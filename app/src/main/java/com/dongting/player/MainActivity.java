@@ -1,13 +1,19 @@
 package com.dongting.player;
 
+import android.Manifest;
 import android.app.AlertDialog;
+import android.content.ComponentName;
+import android.content.Context;
 import android.content.ContentResolver;
 import android.content.Intent;
+import android.content.ServiceConnection;
 import android.content.SharedPreferences;
 import android.media.audiofx.LoudnessEnhancer;
 import android.net.Uri;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
+import android.os.IBinder;
 import android.os.Looper;
 import android.provider.Settings;
 import android.speech.tts.TextToSpeech;
@@ -37,6 +43,7 @@ import androidx.documentfile.provider.DocumentFile;
 import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
+import androidx.media3.common.MediaMetadata;
 import androidx.media3.common.PlaybackParameters;
 import androidx.media3.common.Player;
 import androidx.media3.exoplayer.ExoPlayer;
@@ -79,6 +86,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private final Random random = new Random();
 
     private SharedPreferences prefs;
+    private PlaybackService playbackService;
     private ExoPlayer player;
     private ExoPlayer bgPlayer;
     private MediaSession mediaSession;
@@ -114,6 +122,26 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private String searchQuery = "";
     private String importedText = "";
     private final List<Voice> voices = new ArrayList<>();
+
+    private final ServiceConnection playbackConnection = new ServiceConnection() {
+        @Override public void onServiceConnected(ComponentName name, IBinder service) {
+            playbackService = ((PlaybackService.LocalBinder) service).getService();
+            player = playbackService.getPlayer();
+            mediaSession = playbackService.getMediaSession();
+            playerView.setPlayer(player);
+            attachPlayerListener();
+            restoreLastSession();
+            updatePlayPauseButton();
+            updatePositionUi();
+        }
+
+        @Override public void onServiceDisconnected(ComponentName name) {
+            playbackService = null;
+            player = null;
+            mediaSession = null;
+            playerView.setPlayer(null);
+        }
+    };
 
     private final ActivityResultLauncher<Intent> folderPicker =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
@@ -151,9 +179,15 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         selectedPlaylist = prefs.getString("selectedPlaylist", "默认列表");
         setupPlayers();
         setupUi();
+        requestNotificationPermission();
         loadPlaylists();
-        restoreLastSession();
         tts = new TextToSpeech(this, this);
+    }
+
+    private void requestNotificationPermission() {
+        if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
+            requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1001);
+        }
     }
 
     private void setupPlayers() {
@@ -161,10 +195,17 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
                 .setUsage(C.USAGE_MEDIA)
                 .build();
-        player = new ExoPlayer.Builder(this).setAudioAttributes(attrs, true).build();
         bgPlayer = new ExoPlayer.Builder(this).setAudioAttributes(attrs, false).build();
-        mediaSession = new MediaSession.Builder(this, player).build();
         bgPlayer.setRepeatMode(Player.REPEAT_MODE_ONE);
+        Intent serviceIntent = new Intent(this, PlaybackService.class);
+        startService(serviceIntent);
+        bindService(serviceIntent, playbackConnection, Context.BIND_AUTO_CREATE);
+        handler.post(abLoopTicker);
+        handler.post(positionTicker);
+    }
+
+    private void attachPlayerListener() {
+        if (player == null) return;
         player.addListener(new Player.Listener() {
             @Override
             public void onPlaybackStateChanged(int playbackState) {
@@ -179,10 +220,28 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             @Override
             public void onIsPlayingChanged(boolean isPlaying) {
                 updatePlayPauseButton();
+                if (playbackService != null) playbackService.refreshNotification();
+            }
+
+            @Override
+            public void onMediaItemTransition(@Nullable MediaItem mediaItem, int reason) {
+                if (player == null) return;
+                int index = player.getCurrentMediaItemIndex();
+                if (index >= 0 && index < queue.size() && index != currentIndex) {
+                    currentIndex = index;
+                    MediaEntry entry = queue.get(currentIndex);
+                    nowPlaying.setText(entry.title + "\n" + entry.folderName);
+                    loadAb(entry.uri);
+                    prefs.edit()
+                            .putString("currentUri", entry.uri)
+                            .putString("selectedPlaylist", selectedPlaylist)
+                            .putInt("currentIndex", currentIndex)
+                            .apply();
+                    refreshMediaList();
+                }
+                updatePositionUi();
             }
         });
-        handler.post(abLoopTicker);
-        handler.post(positionTicker);
     }
 
     private void setupUi() {
@@ -210,7 +269,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         positionBar.setMax(1000);
         positionBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
-                if (fromUser && player.getDuration() > 0 && player.getDuration() != C.TIME_UNSET) {
+                if (fromUser && player != null && player.getDuration() > 0 && player.getDuration() != C.TIME_UNSET) {
                     long target = player.getDuration() * progress / 1000L;
                     positionLabel.setText(formatMs(target) + " / " + formatMs(player.getDuration()));
                 }
@@ -221,7 +280,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             }
 
             @Override public void onStopTrackingTouch(SeekBar seekBar) {
-                if (player.getDuration() > 0 && player.getDuration() != C.TIME_UNSET) {
+                if (player != null && player.getDuration() > 0 && player.getDuration() != C.TIME_UNSET) {
                     player.seekTo(player.getDuration() * seekBar.getProgress() / 1000L);
                 }
                 draggingPosition = false;
@@ -304,7 +363,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         volumeBar.setMax(100);
         volumeBar.setProgress(prefs.getInt("volume", 100));
         volumeBar.setOnSeekBarChangeListener(simpleSeek((bar, progress, fromUser) -> {
-            player.setVolume(progress / 100f);
+            if (player != null) player.setVolume(progress / 100f);
             prefs.edit().putInt("volume", progress).apply();
         }));
         root.addView(label("播放音量", 14, COLOR_SUBTLE));
@@ -367,7 +426,6 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
         setContentView(root);
         setSpeed((speedBar.getProgress() + 25) / 100f, false);
-        player.setVolume(volumeBar.getProgress() / 100f);
         bgPlayer.setVolume(bgVolumeBar.getProgress() / 100f);
         updateLoopLabel();
         updatePlayPauseButton();
@@ -429,10 +487,31 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         List<MediaEntry> snapshot = new ArrayList<>(source);
         queue.clear();
         queue.addAll(snapshot);
+        syncPlayerQueue();
         refreshMediaList();
         if (showLibrary && !queue.isEmpty()) {
             status("可点选文件播放；再次点当前播放项可暂停/继续");
         }
+    }
+
+    private void syncPlayerQueue() {
+        if (player == null) return;
+        List<MediaItem> items = new ArrayList<>();
+        for (MediaEntry entry : queue) {
+            MediaMetadata metadata = new MediaMetadata.Builder()
+                    .setTitle(entry.title)
+                    .setArtist(entry.folderName)
+                    .build();
+            items.add(new MediaItem.Builder()
+                    .setUri(Uri.parse(entry.uri))
+                    .setMediaMetadata(metadata)
+                    .build());
+        }
+        long position = currentIndex >= 0 ? player.getCurrentPosition() : 0;
+        int safeIndex = currentIndex >= 0 && currentIndex < items.size() ? currentIndex : 0;
+        player.setMediaItems(items, safeIndex, position);
+        player.prepare();
+        player.setVolume(volumeBar == null ? 1f : volumeBar.getProgress() / 100f);
     }
 
     private void refreshMediaList() {
@@ -456,14 +535,18 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void playAt(int index) {
+        if (player == null) {
+            status("播放器服务正在启动，请稍后再试");
+            return;
+        }
         if (index < 0 || index >= queue.size()) return;
         saveCurrentPosition();
         currentIndex = index;
         MediaEntry entry = queue.get(index);
         suppressPositionSave = false;
         nowPlaying.setText(entry.title + "\n" + entry.folderName);
-        player.setMediaItem(MediaItem.fromUri(Uri.parse(entry.uri)));
-        player.prepare();
+        if (player.getMediaItemCount() != queue.size()) syncPlayerQueue();
+        player.seekTo(index, 0);
         long last = prefs.getLong("pos:" + entry.uri, 0);
         if (last > 0) player.seekTo(last);
         float folderSpeed = prefs.getFloat(speedKey(entry), prefs.getFloat("lastSpeed", 1f));
@@ -476,6 +559,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 .putInt("currentIndex", currentIndex)
                 .apply();
         player.play();
+        if (playbackService != null) playbackService.refreshNotification();
         refreshMediaList();
         updatePlayPauseButton();
         updatePositionUi();
@@ -493,6 +577,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void togglePlay() {
+        if (player == null) {
+            status("播放器服务正在启动，请稍后再试");
+            return;
+        }
         if (currentIndex < 0 && !queue.isEmpty()) {
             playAt(0);
             return;
@@ -515,6 +603,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void seekBy(long deltaMs) {
+        if (player == null) return;
         if (currentIndex < 0) return;
         long duration = player.getDuration();
         long target = Math.max(0, player.getCurrentPosition() + deltaMs);
@@ -562,6 +651,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private final Runnable sleepTimer = new Runnable() {
         @Override public void run() {
+            if (player == null) return;
             player.pause();
             saveCurrentPosition();
             prefs.edit().remove("sleepAt").putBoolean("stopAfterCurrent", false).apply();
@@ -571,6 +661,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     };
 
     private void handleEnded() {
+        if (player == null) return;
         saveCurrentPositionAsZero();
         if (loopMode == 1) {
             player.seekTo(0);
@@ -594,7 +685,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     };
 
     private void updatePositionUi() {
-        if (positionBar == null || positionLabel == null || draggingPosition) return;
+        if (player == null || positionBar == null || positionLabel == null || draggingPosition) return;
         long duration = player.getDuration();
         long position = player.getCurrentPosition();
         if (duration <= 0 || duration == C.TIME_UNSET) {
@@ -608,13 +699,17 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private void updatePlayPauseButton() {
         if (playPauseButton == null) return;
+        if (player == null) {
+            playPauseButton.setText("播放");
+            return;
+        }
         playPauseButton.setText(player.isPlaying() ? "暂停" : "播放");
     }
 
     private void setSpeed(float speed, boolean persist) {
         float fixed = Math.max(0.25f, Math.min(8f, speed));
         speedLabel.setText(String.format(Locale.CHINA, "播放速度 %.2fx", fixed));
-        player.setPlaybackParameters(new PlaybackParameters(fixed));
+        if (player != null) player.setPlaybackParameters(new PlaybackParameters(fixed));
         if (persist) {
             SharedPreferences.Editor editor = prefs.edit().putFloat("lastSpeed", fixed);
             MediaEntry entry = currentEntry();
@@ -639,6 +734,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void setA() {
+        if (player == null) return;
         abA = player.getCurrentPosition();
         abEnabled = abB != C.TIME_UNSET && abB > abA;
         persistAb();
@@ -647,6 +743,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void setB() {
+        if (player == null) return;
         abB = player.getCurrentPosition();
         abEnabled = abA != C.TIME_UNSET && abB > abA;
         persistAb();
@@ -664,6 +761,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void loadAb(String uri) {
+        if (player == null) return;
         abA = C.TIME_UNSET;
         abB = C.TIME_UNSET;
         abEnabled = false;
@@ -696,7 +794,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private final Runnable abLoopTicker = new Runnable() {
         @Override public void run() {
-            if (abEnabled && abA != C.TIME_UNSET && abB != C.TIME_UNSET && player.isPlaying() && player.getCurrentPosition() >= abB) {
+            if (player != null && abEnabled && abA != C.TIME_UNSET && abB != C.TIME_UNSET && player.isPlaying() && player.getCurrentPosition() >= abB) {
                 player.seekTo(abA);
             }
             handler.postDelayed(this, 250);
@@ -757,6 +855,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void restoreLastSession() {
+        if (player == null) return;
         long sleepAt = prefs.getLong("sleepAt", 0);
         if (sleepAt > System.currentTimeMillis()) {
             handler.postDelayed(sleepTimer, sleepAt - System.currentTimeMillis());
@@ -786,8 +885,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         currentIndex = restoredIndex;
         MediaEntry entry = queue.get(currentIndex);
         nowPlaying.setText(entry.title + "\n" + entry.folderName);
-        player.setMediaItem(MediaItem.fromUri(Uri.parse(entry.uri)));
-        player.prepare();
+        syncPlayerQueue();
+        player.seekTo(currentIndex, 0);
         long last = prefs.getLong("pos:" + entry.uri, 0);
         if (last > 0) player.seekTo(last);
         float folderSpeed = prefs.getFloat(speedKey(entry), prefs.getFloat("lastSpeed", 1f));
@@ -911,6 +1010,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void attachLoudnessEnhancer() {
+        if (player == null) return;
         try {
             if (loudnessEnhancer != null) loudnessEnhancer.release();
             loudnessEnhancer = new LoudnessEnhancer(player.getAudioSessionId());
@@ -939,7 +1039,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private void saveCurrentPosition() {
         MediaEntry entry = currentEntry();
-        if (entry != null && !suppressPositionSave) {
+        if (entry != null && !suppressPositionSave && player != null) {
             prefs.edit()
                     .putLong("pos:" + entry.uri, player.getCurrentPosition())
                     .putString("currentUri", entry.uri)
@@ -1067,7 +1167,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         handler.removeCallbacksAndMessages(null);
         saveCurrentPosition();
         if (loudnessEnhancer != null) loudnessEnhancer.release();
-        player.release();
+        if (playbackService != null) playbackService.refreshNotification();
+        try {
+            unbindService(playbackConnection);
+        } catch (IllegalArgumentException ignored) {
+        }
         bgPlayer.release();
         if (tts != null) {
             tts.stop();
