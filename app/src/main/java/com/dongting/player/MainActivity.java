@@ -30,6 +30,7 @@ import android.text.TextWatcher;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
+import android.view.WindowManager;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -74,8 +75,6 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public class MainActivity extends AppCompatActivity implements TextToSpeech.OnInitListener {
     private static final String PREFS = "dongting_player";
@@ -305,6 +304,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                             .apply();
                     refreshMediaList();
                 }
+                updateVideoKeepScreenOn();
                 updatePositionUi();
             }
 
@@ -327,6 +327,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         nowPlaying = label("洞听播放器", 20, COLOR_TEXT);
         nowPlaying.setGravity(Gravity.CENTER_VERTICAL);
         nowPlaying.setOnClickListener(v -> togglePlay());
+        nowPlaying.setOnLongClickListener(v -> {
+            showNowPlayingPage();
+            return true;
+        });
         rootLayout.addView(nowPlaying);
 
         playerView = new PlayerView(this);
@@ -388,7 +392,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         rootLayout.addView(row(
                 btn("快退15秒", v -> seekBy(-15000)),
                 btn("快进30秒", v -> seekBy(30000)),
-                btn("随机播放", v -> playRandom()),
+                btn("播放页", v -> showNowPlayingPage()),
                 btn("睡眠定时", v -> showSleepTimerDialog())
         ));
 
@@ -859,6 +863,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         if (playbackService != null) playbackService.refreshNotification();
         refreshMediaList();
         updatePlayPauseButton();
+        updateVideoKeepScreenOn();
         updatePositionUi();
         status("正在播放：" + entry.folderName);
     }
@@ -889,6 +894,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             player.play();
         }
         updatePlayPauseButton();
+        updateVideoKeepScreenOn();
     }
 
     private void playRelative(int delta) {
@@ -923,6 +929,125 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         playAt(next);
     }
 
+    private void showNowPlayingPage() {
+        MediaEntry entry = currentEntry();
+        if (entry == null) {
+            status("当前没有正在播放的文件");
+            return;
+        }
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(16), dp(10), dp(16), dp(4));
+
+        TextView title = label(entry.title, 20, COLOR_TEXT);
+        title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        TextView subtitle = label(entry.folderName + " · " + ("video".equals(entry.type) ? "视频" : "音频"), 14, COLOR_SUBTLE);
+        TextView progressText = label("00:00 / 00:00", 14, COLOR_SUBTLE);
+        progressText.setGravity(Gravity.CENTER);
+        SeekBar dialogSeek = new SeekBar(this);
+        dialogSeek.setMax(1000);
+        final boolean[] dragging = {false};
+        dialogSeek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                if (fromUser && player != null && player.getDuration() > 0 && player.getDuration() != C.TIME_UNSET) {
+                    long target = player.getDuration() * progress / 1000L;
+                    progressText.setText(formatMs(target) + " / " + formatMs(player.getDuration()));
+                }
+            }
+
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {
+                dragging[0] = true;
+            }
+
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {
+                if (player != null && player.getDuration() > 0 && player.getDuration() != C.TIME_UNSET) {
+                    player.seekTo(player.getDuration() * seekBar.getProgress() / 1000L);
+                    saveCurrentPosition();
+                }
+                dragging[0] = false;
+            }
+        });
+
+        Button dialogPlay = btn(player != null && player.isPlaying() ? "暂停" : "播放", v -> {
+            togglePlay();
+            dialogPlayText(v);
+        });
+        Button speedButton = btn(String.format(Locale.CHINA, "%.2fx", player == null ? 1f : player.getPlaybackParameters().speed), v -> showSpeedDialog());
+        panel.addView(title);
+        panel.addView(subtitle);
+        panel.addView(progressText);
+        panel.addView(dialogSeek);
+        panel.addView(row(
+                btn("上一首", v -> playRelative(-1)),
+                btn("快退15秒", v -> seekBy(-15000)),
+                dialogPlay,
+                btn("快进30秒", v -> seekBy(30000)),
+                btn("下一首", v -> playRelative(1))
+        ));
+        panel.addView(row(
+                speedButton,
+                btn("循环模式", v -> cycleLoop()),
+                btn("A点", v -> setA()),
+                btn("B点", v -> setB()),
+                btn("书签", v -> showBookmarks())
+        ));
+        panel.addView(row(
+                btn("收藏", v -> addCurrentToFavorites()),
+                btn("随机", v -> playRandom()),
+                btn("清AB", v -> clearAb()),
+                btn("回开头", v -> seekToStart())
+        ));
+
+        final Runnable[] updater = new Runnable[1];
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("正在播放")
+                .setView(panel)
+                .setNegativeButton("关闭", null)
+                .create();
+        updater[0] = new Runnable() {
+            @Override public void run() {
+                if (!dialog.isShowing()) return;
+                MediaEntry current = currentEntry();
+                if (current != null) {
+                    title.setText(current.title);
+                    subtitle.setText(current.folderName + " · " + ("video".equals(current.type) ? "视频" : "音频"));
+                }
+                if (player != null) {
+                    long duration = player.getDuration();
+                    long position = player.getCurrentPosition();
+                    progressText.setText(formatMs(position) + " / " + formatMs(duration));
+                    if (!dragging[0] && duration > 0 && duration != C.TIME_UNSET) {
+                        dialogSeek.setProgress((int) Math.max(0, Math.min(1000, position * 1000L / duration)));
+                    }
+                    dialogPlay.setText(player.isPlaying() ? "暂停" : "播放");
+                    speedButton.setText(String.format(Locale.CHINA, "%.2fx", player.getPlaybackParameters().speed));
+                }
+                handler.postDelayed(this, 500);
+            }
+        };
+        dialog.setOnShowListener(d -> handler.post(updater[0]));
+        dialog.setOnDismissListener(d -> handler.removeCallbacks(updater[0]));
+        dialog.show();
+    }
+
+    private void dialogPlayText(View view) {
+        if (view instanceof Button && player != null) {
+            ((Button) view).setText(player.isPlaying() ? "暂停" : "播放");
+        }
+    }
+
+    private void showSpeedDialog() {
+        String[] options = {"0.5x", "0.75x", "1.0x", "1.25x", "1.5x", "2.0x", "3.0x", "4.0x", "8.0x"};
+        new AlertDialog.Builder(this)
+                .setTitle("播放速度")
+                .setItems(options, (dialog, which) -> {
+                    float speed = Float.parseFloat(options[which].replace("x", ""));
+                    if (speedBar != null) speedBar.setProgress(Math.round((speed - 0.25f) * 100f));
+                    setSpeed(speed, true);
+                })
+                .show();
+    }
+
     private void toggleFullScreenVideo() {
         if (rootLayout == null || playerView == null) return;
         fullScreenVideo = !fullScreenVideo;
@@ -944,7 +1069,20 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         getWindow().getDecorView().setSystemUiVisibility(fullScreenVideo
                 ? View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                 : View.SYSTEM_UI_FLAG_VISIBLE);
+        playerView.setUseController(fullScreenVideo);
+        updateVideoKeepScreenOn();
         status(fullScreenVideo ? "已进入视频全屏，点画面或返回退出" : "已退出全屏");
+    }
+
+    private void updateVideoKeepScreenOn() {
+        MediaEntry entry = currentEntry();
+        boolean keepOn = player != null && player.isPlaying() && entry != null && "video".equals(entry.type);
+        if (keepOn || fullScreenVideo) {
+            getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        } else {
+            getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+        }
+        if (playerView != null && !fullScreenVideo) playerView.setUseController(false);
     }
 
     @Override
@@ -2006,41 +2144,15 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private int compareMedia(MediaEntry a, MediaEntry b) {
-        Integer an = firstNumber(a.title);
-        Integer bn = firstNumber(b.title);
-        if (an != null && bn != null && !an.equals(bn)) return Integer.compare(an, bn);
-        if (an != null && bn == null) return -1;
-        if (an == null && bn != null) return 1;
-        return collator.compare(a.title, b.title);
-    }
-
-    @Nullable
-    private Integer firstNumber(String value) {
-        Matcher matcher = Pattern.compile("(\\d+)").matcher(value == null ? "" : value);
-        if (matcher.find()) {
-            try {
-                return Integer.parseInt(matcher.group(1));
-            } catch (NumberFormatException ignored) {
-            }
-        }
-        return null;
+        return MediaUtils.compareTitle(a.title, b.title, collator);
     }
 
     private boolean isMedia(String name) {
-        if (name == null) return false;
-        String lower = name.toLowerCase(Locale.ROOT);
-        return lower.endsWith(".mp3") || lower.endsWith(".m4a") || lower.endsWith(".aac")
-                || lower.endsWith(".flac") || lower.endsWith(".wav") || lower.endsWith(".ogg")
-                || lower.endsWith(".opus") || lower.endsWith(".mp4") || lower.endsWith(".mkv")
-                || lower.endsWith(".webm") || lower.endsWith(".3gp") || lower.endsWith(".mov")
-                || lower.endsWith(".avi");
+        return MediaUtils.isMedia(name);
     }
 
     private boolean isVideo(String name) {
-        if (name == null) return false;
-        String lower = name.toLowerCase(Locale.ROOT);
-        return lower.endsWith(".mp4") || lower.endsWith(".mkv") || lower.endsWith(".webm")
-                || lower.endsWith(".3gp") || lower.endsWith(".mov") || lower.endsWith(".avi");
+        return MediaUtils.isVideo(name);
     }
 
     private LinearLayout row(View... views) {
@@ -2096,9 +2208,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private String formatMs(long ms) {
-        if (ms == C.TIME_UNSET || ms < 0) return "--:--";
-        long total = ms / 1000;
-        return String.format(Locale.CHINA, "%02d:%02d", total / 60, total % 60);
+        return MediaUtils.formatMs(ms);
     }
 
     @Override
