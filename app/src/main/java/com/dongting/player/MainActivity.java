@@ -50,6 +50,7 @@ import java.text.Collator;
 import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Locale;
 import java.util.Map;
@@ -84,8 +85,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private Spinner voiceSpinner;
     private TextView nowPlaying;
     private TextView status;
+    private TextView positionLabel;
     private TextView speedLabel;
     private TextView loopLabel;
+    private Button playPauseButton;
+    private SeekBar positionBar;
     private SeekBar speedBar;
     private SeekBar volumeBar;
     private SeekBar boostBar;
@@ -96,6 +100,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private long abA = C.TIME_UNSET;
     private long abB = C.TIME_UNSET;
     private boolean abEnabled = false;
+    private boolean draggingPosition = false;
     private boolean suppressPositionSave = false;
     private String selectedPlaylist = "默认列表";
     private String importedText = "";
@@ -153,12 +158,19 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             public void onPlaybackStateChanged(int playbackState) {
                 if (playbackState == Player.STATE_READY) {
                     attachLoudnessEnhancer();
+                    updatePositionUi();
                 } else if (playbackState == Player.STATE_ENDED) {
                     handleEnded();
                 }
             }
+
+            @Override
+            public void onIsPlayingChanged(boolean isPlaying) {
+                updatePlayPauseButton();
+            }
         });
         handler.post(abLoopTicker);
+        handler.post(positionTicker);
     }
 
     private void setupUi() {
@@ -168,6 +180,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         root.setPadding(dp(10), dp(10), dp(10), dp(10));
 
         nowPlaying = label("洞听播放器", 20, COLOR_TEXT);
+        nowPlaying.setGravity(Gravity.CENTER_VERTICAL);
+        nowPlaying.setOnClickListener(v -> togglePlay());
         root.addView(nowPlaying);
 
         playerView = new PlayerView(this);
@@ -176,6 +190,34 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         playerView.setBackgroundColor(0xFF050708);
         root.addView(playerView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(210)));
 
+        positionLabel = label("00:00 / 00:00", 13, COLOR_SUBTLE);
+        positionLabel.setGravity(Gravity.CENTER);
+        root.addView(positionLabel);
+
+        positionBar = new SeekBar(this);
+        positionBar.setMax(1000);
+        positionBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                if (fromUser && player.getDuration() > 0 && player.getDuration() != C.TIME_UNSET) {
+                    long target = player.getDuration() * progress / 1000L;
+                    positionLabel.setText(formatMs(target) + " / " + formatMs(player.getDuration()));
+                }
+            }
+
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {
+                draggingPosition = true;
+            }
+
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {
+                if (player.getDuration() > 0 && player.getDuration() != C.TIME_UNSET) {
+                    player.seekTo(player.getDuration() * seekBar.getProgress() / 1000L);
+                }
+                draggingPosition = false;
+                updatePositionUi();
+            }
+        });
+        root.addView(positionBar);
+
         root.addView(row(
                 btn("扫描文件夹", v -> pickFolder()),
                 btn("新建列表", v -> createPlaylist()),
@@ -183,12 +225,17 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 btn("投屏", v -> status("二期功能：将接入 MediaRouter/Cast/DLNA，支持仅投画面或音画同投。"))
         ));
 
-        root.addView(row(
+        LinearLayout playbackRow = row(
                 btn("上一首", v -> playRelative(-1)),
-                btn("播放/暂停", v -> togglePlay()),
+                btn("播放", v -> togglePlay()),
                 btn("下一首", v -> playRelative(1)),
                 btn("设置", v -> openAndroidSoundSettings())
-        ));
+        );
+        playPauseButton = (Button) playbackRow.getChildAt(1);
+        playPauseButton.setTextSize(18);
+        playPauseButton.setTextColor(0xFF101418);
+        playPauseButton.setBackgroundColor(COLOR_ACCENT);
+        root.addView(playbackRow);
 
         playlistSpinner = new Spinner(this);
         root.addView(playlistSpinner, fullWrap());
@@ -269,7 +316,13 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         mediaList.setBackgroundColor(COLOR_PANEL);
         mediaAdapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, new ArrayList<>());
         mediaList.setAdapter(mediaAdapter);
-        mediaList.setOnItemClickListener((parent, view, position, id) -> playAt(position));
+        mediaList.setOnItemClickListener((parent, view, position, id) -> {
+            if (position == currentIndex) {
+                togglePlay();
+            } else {
+                playAt(position);
+            }
+        });
         root.addView(mediaList, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         setContentView(root);
@@ -277,6 +330,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         player.setVolume(volumeBar.getProgress() / 100f);
         bgPlayer.setVolume(bgVolumeBar.getProgress() / 100f);
         updateLoopLabel();
+        updatePlayPauseButton();
+        updatePositionUi();
     }
 
     private void pickFolder() {
@@ -292,41 +347,62 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             return;
         }
         library.clear();
-        scanInto(root, root.getUri().toString(), library);
+        Map<String, List<MediaEntry>> folderBuckets = new LinkedHashMap<>();
+        Map<String, String> folderNames = new HashMap<>();
+        scanInto(root, root.getUri().toString(), library, folderBuckets, folderNames);
         Collections.sort(library, this::compareMedia);
+        playlists.put("全部文件", new ArrayList<>(library));
+        for (Map.Entry<String, List<MediaEntry>> bucket : folderBuckets.entrySet()) {
+            Collections.sort(bucket.getValue(), this::compareMedia);
+            playlists.put("文件夹：" + bucket.getKey(), new ArrayList<>(bucket.getValue()));
+        }
+        savePlaylists();
+        selectedPlaylist = "全部文件";
+        refreshPlaylistSpinner();
         setQueue(library, true);
         prefs.edit().putString("lastFolder", folderUri.toString()).apply();
-        status("扫描完成：" + library.size() + " 个音视频文件");
+        status("扫描完成：" + library.size() + " 个音视频文件，已自动生成 " + folderBuckets.size() + " 个文件夹列表");
     }
 
-    private void scanInto(DocumentFile dir, String folderKey, List<MediaEntry> output) {
+    private void scanInto(DocumentFile dir, String folderKey, List<MediaEntry> output, Map<String, List<MediaEntry>> folderBuckets, Map<String, String> folderNames) {
         DocumentFile[] files = dir.listFiles();
         for (DocumentFile file : files) {
             if (file.isDirectory()) {
-                scanInto(file, file.getUri().toString(), output);
+                scanInto(file, file.getUri().toString(), output, folderBuckets, folderNames);
             } else if (file.isFile() && isMedia(file.getName())) {
-                output.add(new MediaEntry(
+                String baseName = dir.getName() == null ? "未命名文件夹" : dir.getName();
+                String folderName = folderNames.computeIfAbsent(folderKey, key -> uniqueFolderName(folderBuckets, baseName));
+                MediaEntry entry = new MediaEntry(
                         file.getUri().toString(),
                         file.getName() == null ? "未命名" : file.getName(),
-                        dir.getName() == null ? folderKey : dir.getName(),
+                        folderName,
                         folderKey,
                         isVideo(file.getName()) ? "video" : "audio"
-                ));
+                );
+                output.add(entry);
+                folderBuckets.computeIfAbsent(folderName, key -> new ArrayList<>()).add(entry);
             }
         }
     }
 
     private void setQueue(List<MediaEntry> source, boolean showLibrary) {
+        List<MediaEntry> snapshot = new ArrayList<>(source);
         queue.clear();
-        queue.addAll(source);
+        queue.addAll(snapshot);
+        refreshMediaList();
+        if (showLibrary && !queue.isEmpty()) {
+            status("可点选文件播放；再次点当前播放项可暂停/继续");
+        }
+    }
+
+    private void refreshMediaList() {
         mediaAdapter.clear();
-        for (MediaEntry entry : queue) {
-            mediaAdapter.add((entry.type.equals("video") ? "[视频] " : "[音频] ") + entry.title);
+        for (int i = 0; i < queue.size(); i++) {
+            MediaEntry entry = queue.get(i);
+            String prefix = i == currentIndex ? "正在播放  " : "";
+            mediaAdapter.add(prefix + (entry.type.equals("video") ? "[视频] " : "[音频] ") + entry.title + "\n" + entry.folderName);
         }
         mediaAdapter.notifyDataSetChanged();
-        if (showLibrary && !queue.isEmpty()) {
-            status("可点选文件播放，也可以加入自建列表");
-        }
     }
 
     private void playAt(int index) {
@@ -335,7 +411,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         currentIndex = index;
         MediaEntry entry = queue.get(index);
         suppressPositionSave = false;
-        nowPlaying.setText(entry.title);
+        nowPlaying.setText(entry.title + "\n" + entry.folderName);
         player.setMediaItem(MediaItem.fromUri(Uri.parse(entry.uri)));
         player.prepare();
         long last = prefs.getLong("pos:" + entry.uri, 0);
@@ -345,7 +421,20 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         setSpeed(folderSpeed, false);
         loadAb(entry.uri);
         player.play();
+        refreshMediaList();
+        updatePlayPauseButton();
+        updatePositionUi();
         status("正在播放：" + entry.folderName);
+    }
+
+    private String uniqueFolderName(Map<String, List<MediaEntry>> folderBuckets, String baseName) {
+        String candidate = baseName;
+        int index = 2;
+        while (folderBuckets.containsKey(candidate)) {
+            candidate = baseName + " (" + index + ")";
+            index++;
+        }
+        return candidate;
     }
 
     private void togglePlay() {
@@ -359,6 +448,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         } else {
             player.play();
         }
+        updatePlayPauseButton();
     }
 
     private void playRelative(int delta) {
@@ -376,7 +466,34 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             player.play();
         } else if (loopMode == 2 && !queue.isEmpty()) {
             playRelative(1);
+        } else {
+            updatePlayPauseButton();
         }
+    }
+
+    private final Runnable positionTicker = new Runnable() {
+        @Override public void run() {
+            updatePositionUi();
+            handler.postDelayed(this, 500);
+        }
+    };
+
+    private void updatePositionUi() {
+        if (positionBar == null || positionLabel == null || draggingPosition) return;
+        long duration = player.getDuration();
+        long position = player.getCurrentPosition();
+        if (duration <= 0 || duration == C.TIME_UNSET) {
+            positionBar.setProgress(0);
+            positionLabel.setText(formatMs(position) + " / 00:00");
+            return;
+        }
+        positionBar.setProgress((int) Math.max(0, Math.min(1000, position * 1000L / duration)));
+        positionLabel.setText(formatMs(position) + " / " + formatMs(duration));
+    }
+
+    private void updatePlayPauseButton() {
+        if (playPauseButton == null) return;
+        playPauseButton.setText(player.isPlaying() ? "暂停" : "播放");
     }
 
     private void setSpeed(float speed, boolean persist) {
