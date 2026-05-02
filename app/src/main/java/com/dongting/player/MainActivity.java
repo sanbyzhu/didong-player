@@ -86,6 +86,8 @@ import java.util.Locale;
 import java.util.Map;
 import java.util.Random;
 import java.util.Set;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class MainActivity extends AppCompatActivity implements TextToSpeech.OnInitListener {
     private static final String PREFS = "dongting_player";
@@ -114,6 +116,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private final Random random = new Random();
 
     private SharedPreferences prefs;
+    private DongtingDatabase database;
     private PlaybackService playbackService;
     private ExoPlayer player;
     private ExoPlayer bgPlayer;
@@ -283,7 +286,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        selectedPlaylist = prefs.getString("selectedPlaylist", PLAYLIST_DEFAULT);
+        database = new DongtingDatabase(this);
+        selectedPlaylist = prefs.getString("selectedPlaylist", dbGet("selectedPlaylist", PLAYLIST_DEFAULT));
         loopMode = prefs.getInt("loopMode", 0);
         advancedVisible = prefs.getBoolean("advancedVisible", false);
         mediaFilter = prefs.getString("mediaFilter", "all");
@@ -306,6 +310,49 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private void requestNotificationPermission() {
         if (Build.VERSION.SDK_INT >= 33 && checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED) {
             requestPermissions(new String[]{Manifest.permission.POST_NOTIFICATIONS}, 1001);
+        }
+    }
+
+    private void dbPut(String key, String value) {
+        if (database == null) return;
+        try {
+            database.put(key, value);
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    private String dbGet(String key, String fallback) {
+        if (database == null) return fallback;
+        try {
+            return database.get(key, fallback);
+        } catch (RuntimeException ignored) {
+            return fallback;
+        }
+    }
+
+    private void dbRemove(String key) {
+        if (database == null) return;
+        try {
+            database.remove(key);
+        } catch (RuntimeException ignored) {
+        }
+    }
+
+    private long getStoredLong(String key, long fallback) {
+        if (prefs.contains(key)) return prefs.getLong(key, fallback);
+        try {
+            return Long.parseLong(dbGet(key, String.valueOf(fallback)));
+        } catch (RuntimeException ignored) {
+            return fallback;
+        }
+    }
+
+    private int getStoredInt(String key, int fallback) {
+        if (prefs.contains(key)) return prefs.getInt(key, fallback);
+        try {
+            return Integer.parseInt(dbGet(key, String.valueOf(fallback)));
+        } catch (RuntimeException ignored) {
+            return fallback;
         }
     }
 
@@ -609,6 +656,17 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         }
         audioEffectStatus = label("音效状态：等待播放器准备", 13, COLOR_SUBTLE);
         advancedPanel.addView(audioEffectStatus);
+        advancedPanel.addView(row(
+                btn("人声预设", v -> applyAudioPreset("voice")),
+                btn("低音预设", v -> applyAudioPreset("bass")),
+                btn("清晰预设", v -> applyAudioPreset("clear")),
+                btn("夜间预设", v -> applyAudioPreset("night"))
+        ));
+        advancedPanel.addView(row(
+                btn("影院预设", v -> applyAudioPreset("cinema")),
+                btn("学习预设", v -> applyAudioPreset("study")),
+                btn("音效默认", v -> resetAudioEffects())
+        ));
 
         loopLabel = label("", 14, COLOR_SUBTLE);
         controls.addView(loopLabel);
@@ -650,10 +708,20 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 btn("朗读书签", v -> showTextBookmarksDialog())
         ));
         advancedPanel.addView(row(
+                btn("字幕候选", v -> showTimedTextCandidates()),
                 btn("字幕提前0.5", v -> adjustTimedTextOffset(-500)),
                 btn("字幕延后0.5", v -> adjustTimedTextOffset(500)),
-                btn("重置字幕偏移", v -> resetTimedTextOffset()),
                 btn("字幕状态", v -> showTimedTextStatus())
+        ));
+        advancedPanel.addView(row(
+                btn("章节目录", v -> showTextChaptersDialog()),
+                btn("添加朗读书签", v -> addTextBookmark()),
+                btn("朗读进度", v -> showTextProgressStatus()),
+                btn("重读本段", v -> repeatCurrentTextChunk())
+        ));
+        advancedPanel.addView(row(
+                btn("重置字幕偏移", v -> resetTimedTextOffset()),
+                btn("手动导入字幕", v -> pickTimedText())
         ));
         voiceSpinner = new Spinner(this);
         controls.addView(voiceSpinner, fullWrap());
@@ -1031,7 +1099,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 DocumentFile sidecar = timedTextFiles.get(baseName(file.getName()));
                 if (sidecar != null) {
                     prefs.edit().putString("timedSidecar:" + entry.uri, sidecar.getUri().toString()).apply();
+                    dbPut("timedSidecar:" + entry.uri, sidecar.getUri().toString());
                 }
+                saveTimedTextCandidates(entry.uri, timedTextFiles, file.getName());
                 output.add(entry);
                 scannedFileCount++;
                 if (scannedFileCount % 30 == 0) {
@@ -1179,7 +1249,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         nowPlaying.setText(entry.title + "\n" + entry.folderName);
         if (player.getMediaItemCount() != queue.size()) syncPlayerQueue();
         player.seekTo(index, 0);
-        long last = prefs.getLong("pos:" + entry.uri, 0);
+        long last = getStoredLong("pos:" + entry.uri, 0);
         if (last > 0) player.seekTo(last);
         float folderSpeed = prefs.getFloat(speedKey(entry), prefs.getFloat("lastSpeed", 1f));
         speedBar.setProgress(Math.round((folderSpeed - 0.25f) * 100f));
@@ -1196,6 +1266,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 .putString(playlistMemoryUriKey(selectedPlaylist), entry.uri)
                 .putInt(playlistMemoryIndexKey(selectedPlaylist), currentIndex)
                 .apply();
+        dbPut("currentUri", entry.uri);
+        dbPut("selectedPlaylist", selectedPlaylist);
+        dbPut("currentIndex", String.valueOf(currentIndex));
+        dbPut(playlistMemoryUriKey(selectedPlaylist), entry.uri);
+        dbPut(playlistMemoryIndexKey(selectedPlaylist), String.valueOf(currentIndex));
         player.play();
         if (playbackService != null) playbackService.refreshNotification();
         refreshMediaList();
@@ -1278,6 +1353,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         MediaEntry entry = currentEntry();
         if (entry == null) {
             status("当前没有正在播放的文件");
+            return;
+        }
+        if (System.currentTimeMillis() >= 0) {
+            startActivity(new Intent(this, NowPlayingActivity.class));
             return;
         }
         LinearLayout panel = new LinearLayout(this);
@@ -1429,6 +1508,59 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         timedTextPicker.launch(intent);
     }
 
+    private void saveTimedTextCandidates(String mediaUri, Map<String, DocumentFile> timedTextFiles, String mediaName) {
+        JSONArray array = new JSONArray();
+        String mediaBase = baseName(mediaName);
+        for (Map.Entry<String, DocumentFile> item : timedTextFiles.entrySet()) {
+            DocumentFile file = item.getValue();
+            String fileName = file.getName() == null ? "字幕文件" : file.getName();
+            boolean likely = item.getKey().equals(mediaBase) || item.getKey().contains(mediaBase) || mediaBase.contains(item.getKey());
+            if (!likely && array.length() >= 8) continue;
+            JSONObject obj = new JSONObject();
+            try {
+                obj.put("name", (likely ? "推荐 · " : "") + fileName);
+                obj.put("uri", file.getUri().toString());
+                array.put(obj);
+            } catch (JSONException ignored) {
+            }
+        }
+        String payload = array.toString();
+        prefs.edit().putString("timedCandidates:" + mediaUri, payload).apply();
+        dbPut("timedCandidates:" + mediaUri, payload);
+    }
+
+    private void showTimedTextCandidates() {
+        MediaEntry entry = currentEntry();
+        if (entry == null) {
+            status("当前没有媒体");
+            return;
+        }
+        String raw = prefs.getString("timedCandidates:" + entry.uri, dbGet("timedCandidates:" + entry.uri, "[]"));
+        List<String> names = new ArrayList<>();
+        List<String> uris = new ArrayList<>();
+        try {
+            JSONArray array = new JSONArray(raw);
+            for (int i = 0; i < array.length(); i++) {
+                JSONObject obj = array.getJSONObject(i);
+                String uri = obj.optString("uri", "");
+                if (uri.isEmpty() || uris.contains(uri)) continue;
+                uris.add(uri);
+                names.add(obj.optString("name", "字幕文件"));
+            }
+        } catch (JSONException ignored) {
+        }
+        if (uris.isEmpty()) {
+            status("当前文件没有扫描到同文件夹歌词/字幕候选，可手动导入");
+            pickTimedText();
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("字幕/歌词候选")
+                .setItems(names.toArray(new String[0]), (dialog, which) -> importTimedText(Uri.parse(uris.get(which))))
+                .setNegativeButton("手动导入", (dialog, which) -> pickTimedText())
+                .show();
+    }
+
     private void importTimedText(Uri uri) {
         MediaEntry entry = currentEntry();
         if (entry == null) return;
@@ -1442,6 +1574,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         timedTextLines.addAll(parsed);
         saveTimedText(entry.uri, timedTextLines);
         prefs.edit().putString("timedSidecar:" + entry.uri, uri.toString()).apply();
+        dbPut("timedSidecar:" + entry.uri, uri.toString());
         updateVisualStage();
         status("已导入歌词/字幕：" + timedTextLines.size() + " 行");
     }
@@ -1525,12 +1658,14 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 .putString("timed:" + mediaUri, array.toString())
                 .putLong("timedSavedAt:" + mediaUri, System.currentTimeMillis())
                 .apply();
+        dbPut("timed:" + mediaUri, array.toString());
+        dbPut("timedSavedAt:" + mediaUri, String.valueOf(System.currentTimeMillis()));
     }
 
     private void loadTimedText(String mediaUri) {
         timedTextLines.clear();
-        timedTextOffsetMs = prefs.getLong("timedOffset:" + mediaUri, 0);
-        String raw = prefs.getString("timed:" + mediaUri, "[]");
+        timedTextOffsetMs = getStoredLong("timedOffset:" + mediaUri, 0);
+        String raw = prefs.getString("timed:" + mediaUri, dbGet("timed:" + mediaUri, "[]"));
         try {
             JSONArray array = new JSONArray(raw);
             for (int i = 0; i < array.length(); i++) {
@@ -1540,7 +1675,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         } catch (JSONException ignored) {
         }
         if (timedTextLines.isEmpty()) {
-            String sidecar = prefs.getString("timedSidecar:" + mediaUri, "");
+            String sidecar = prefs.getString("timedSidecar:" + mediaUri, dbGet("timedSidecar:" + mediaUri, ""));
             if (!sidecar.isEmpty()) {
                 List<TimedTextLine> parsed = parseTimedText(readText(Uri.parse(sidecar)));
                 if (!parsed.isEmpty()) {
@@ -1560,6 +1695,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     .remove("timedSidecar:" + entry.uri)
                     .remove("timedOffset:" + entry.uri)
                     .apply();
+            dbRemove("timed:" + entry.uri);
+            dbRemove("timedSidecar:" + entry.uri);
+            dbRemove("timedOffset:" + entry.uri);
         }
         timedTextOffsetMs = 0;
         timedTextLines.clear();
@@ -1611,6 +1749,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         }
         timedTextOffsetMs += deltaMs;
         prefs.edit().putLong("timedOffset:" + entry.uri, timedTextOffsetMs).apply();
+        dbPut("timedOffset:" + entry.uri, String.valueOf(timedTextOffsetMs));
         updateTimedTextUi(player == null ? 0 : player.getCurrentPosition());
         updateVisualStage();
         status("字幕偏移：" + formatSignedMs(timedTextOffsetMs));
@@ -1620,6 +1759,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         MediaEntry entry = currentEntry();
         timedTextOffsetMs = 0;
         if (entry != null) prefs.edit().remove("timedOffset:" + entry.uri).apply();
+        if (entry != null) dbRemove("timedOffset:" + entry.uri);
         updateTimedTextUi(player == null ? 0 : player.getCurrentPosition());
         updateVisualStage();
         status("字幕偏移已重置");
@@ -1631,7 +1771,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             status("当前没有媒体");
             return;
         }
-        String sidecar = prefs.getString("timedSidecar:" + entry.uri, "");
+        String sidecar = prefs.getString("timedSidecar:" + entry.uri, dbGet("timedSidecar:" + entry.uri, ""));
         String message = "歌词/字幕：" + timedTextLines.size() + " 行\n偏移：" + formatSignedMs(timedTextOffsetMs)
                 + (sidecar.isEmpty() ? "\n未绑定外部文件" : "\n已绑定外部文件");
         new AlertDialog.Builder(this)
@@ -2121,7 +2261,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private List<Bookmark> loadBookmarks(String uri) {
         List<Bookmark> marks = new ArrayList<>();
-        String raw = prefs.getString("bookmarks:" + uri, "[]");
+        String raw = prefs.getString("bookmarks:" + uri, dbGet("bookmarks:" + uri, "[]"));
         try {
             JSONArray array = new JSONArray(raw);
             for (int i = 0; i < array.length(); i++) {
@@ -2147,6 +2287,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             }
         }
         prefs.edit().putString("bookmarks:" + uri, array.toString()).apply();
+        dbPut("bookmarks:" + uri, array.toString());
     }
 
     private void loadAb(String uri) {
@@ -2576,17 +2717,17 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             return;
         }
 
-        String savedUri = prefs.getString(playlistMemoryUriKey(playlistName), "");
+        String savedUri = prefs.getString(playlistMemoryUriKey(playlistName), dbGet(playlistMemoryUriKey(playlistName), ""));
         int restoredIndex = indexOfUri(items, savedUri);
         if (restoredIndex < 0) {
-            restoredIndex = Math.max(0, Math.min(prefs.getInt(playlistMemoryIndexKey(playlistName), 0), items.size() - 1));
+            restoredIndex = Math.max(0, Math.min(getStoredInt(playlistMemoryIndexKey(playlistName), 0), items.size() - 1));
         }
 
         currentIndex = restoredIndex;
         MediaEntry entry = items.get(currentIndex);
         nowPlaying.setText(entry.title + "\n" + entry.folderName);
         setQueue(items, false);
-        long last = prefs.getLong("pos:" + entry.uri, 0);
+        long last = getStoredLong("pos:" + entry.uri, 0);
         if (player != null) {
             player.seekTo(currentIndex, Math.max(0, last));
         }
@@ -2611,11 +2752,30 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private void loadPlaylists() {
         playlists.clear();
         playlists.put(PLAYLIST_DEFAULT, new ArrayList<>());
-        String raw = prefs.getString("playlists", "{}");
+        boolean loaded = loadPlaylistsFromJson(prefs.getString("playlists", "{}"));
+        if (!loaded) {
+            loaded = loadPlaylistsFromJson(prefs.getString("playlistsBackup", "{}"));
+            if (loaded) status("播放列表主记录异常，已从 SharedPreferences 备份恢复");
+        }
+        if (!loaded) {
+            loaded = loadPlaylistsFromJson(dbGet("playlists", "{}"));
+            if (loaded) status("播放列表已从本地数据库镜像恢复");
+        }
+        if (!loaded) {
+            loaded = loadPlaylistsFromJson(dbGet("playlistsBackup", "{}"));
+            if (loaded) status("播放列表已从本地数据库备份恢复");
+        }
+        ensureSmartPlaylists();
+        refreshPlaylistSpinner();
+    }
+
+    private boolean loadPlaylistsFromJson(String raw) {
+        if (raw == null || raw.trim().isEmpty() || "{}".equals(raw.trim())) return false;
         try {
             JSONObject root = new JSONObject(raw);
             JSONArray names = root.names();
             if (names != null) {
+                Map<String, List<MediaEntry>> parsed = new HashMap<>();
                 for (int i = 0; i < names.length(); i++) {
                     String name = names.getString(i);
                     JSONArray items = root.getJSONArray(name);
@@ -2623,28 +2783,14 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     for (int j = 0; j < items.length(); j++) {
                         list.add(MediaEntry.fromJson(items.getJSONObject(j)));
                     }
-                    playlists.put(name, list);
+                    parsed.put(name, list);
                 }
+                playlists.putAll(parsed);
+                return true;
             }
         } catch (JSONException ignored) {
-            try {
-                JSONObject root = new JSONObject(prefs.getString("playlistsBackup", "{}"));
-                JSONArray names = root.names();
-                if (names != null) {
-                    for (int i = 0; i < names.length(); i++) {
-                        String name = names.getString(i);
-                        JSONArray items = root.getJSONArray(name);
-                        List<MediaEntry> list = new ArrayList<>();
-                        for (int j = 0; j < items.length(); j++) list.add(MediaEntry.fromJson(items.getJSONObject(j)));
-                        playlists.put(name, list);
-                    }
-                    status("播放列表主记录异常，已从备份恢复");
-                }
-            } catch (JSONException ignoredBackup) {
-            }
         }
-        ensureSmartPlaylists();
-        refreshPlaylistSpinner();
+        return false;
     }
 
     private void ensureSmartPlaylists() {
@@ -2673,7 +2819,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
         applyPlaybackMode();
         setQueue(items, false);
-        String currentUri = prefs.getString("currentUri", "");
+        String currentUri = prefs.getString("currentUri", dbGet("currentUri", ""));
         int restoredIndex = -1;
         for (int i = 0; i < queue.size(); i++) {
             if (queue.get(i).uri.equals(currentUri)) {
@@ -2681,14 +2827,14 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 break;
             }
         }
-        if (restoredIndex < 0) restoredIndex = Math.max(0, Math.min(prefs.getInt("currentIndex", 0), queue.size() - 1));
+        if (restoredIndex < 0) restoredIndex = Math.max(0, Math.min(getStoredInt("currentIndex", 0), queue.size() - 1));
 
         currentIndex = restoredIndex;
         MediaEntry entry = queue.get(currentIndex);
         nowPlaying.setText(entry.title + "\n" + entry.folderName);
         syncPlayerQueue();
         player.seekTo(currentIndex, 0);
-        long last = prefs.getLong("pos:" + entry.uri, 0);
+        long last = getStoredLong("pos:" + entry.uri, 0);
         if (last > 0) player.seekTo(last);
         float folderSpeed = prefs.getFloat(speedKey(entry), prefs.getFloat("lastSpeed", 1f));
         speedBar.setProgress(Math.round((folderSpeed - 0.25f) * 100f));
@@ -2778,6 +2924,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     .putString("playlists", payload)
                     .putLong("playlistsSavedAt", System.currentTimeMillis())
                     .apply();
+            dbPut("playlistsBackup", dbGet("playlists", "{}"));
+            dbPut("playlists", payload);
+            dbPut("playlistsSavedAt", String.valueOf(System.currentTimeMillis()));
         } catch (JSONException ignored) {
         }
     }
@@ -3018,6 +3167,100 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 .show();
     }
 
+    private void showTextChaptersDialog() {
+        if (importedText.trim().isEmpty()) {
+            status("请先导入 txt 文本");
+            return;
+        }
+        if (textChunks.isEmpty()) textChunks.addAll(splitTextForTts(importedText));
+        List<TextChapter> chapters = findTextChapters(importedText);
+        if (chapters.isEmpty()) {
+            status("未识别到章节标题，可继续使用朗读分段或搜索定位");
+            showTextChunksDialog();
+            return;
+        }
+        String[] labels = new String[chapters.size()];
+        for (int i = 0; i < chapters.size(); i++) {
+            TextChapter chapter = chapters.get(i);
+            labels[i] = "第 " + (chapter.chunkIndex + 1) + " 段  " + chapter.title;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("章节目录")
+                .setItems(labels, (dialog, which) -> {
+                    TextChapter chapter = chapters.get(which);
+                    currentTextChunk = chapter.chunkIndex;
+                    if (!importedTextKey.isEmpty()) prefs.edit().putInt("ttsChunk:" + importedTextKey, currentTextChunk).apply();
+                    updateVisualStage();
+                    status("已定位章节：" + chapter.title);
+                })
+                .setNegativeButton("开始朗读此章", (dialog, which) -> repeatCurrentTextChunk())
+                .show();
+    }
+
+    private List<TextChapter> findTextChapters(String text) {
+        List<TextChapter> chapters = new ArrayList<>();
+        Pattern pattern = Pattern.compile("^\\s*((第[一二三四五六七八九十百千万0-9０-９]+[章节回部卷集].{0,40})|(Chapter\\s+\\d+.{0,40})|(CHAPTER\\s+\\d+.{0,40}))\\s*$");
+        String normalized = text.replace("\r\n", "\n").replace('\r', '\n');
+        String[] lines = normalized.split("\n", -1);
+        int offset = 0;
+        for (String line : lines) {
+            String trimmed = line.trim();
+            Matcher matcher = pattern.matcher(trimmed);
+            if (matcher.matches()) {
+                chapters.add(new TextChapter(trimmed, findChunkForCharOffset(offset)));
+            }
+            offset += line.length() + 1;
+        }
+        return chapters;
+    }
+
+    private int findChunkForCharOffset(int charOffset) {
+        if (textChunks.isEmpty()) textChunks.addAll(splitTextForTts(importedText));
+        int total = 0;
+        for (int i = 0; i < textChunks.size(); i++) {
+            total += textChunks.get(i).length();
+            if (total >= charOffset) return i;
+        }
+        return Math.max(0, textChunks.size() - 1);
+    }
+
+    private void showTextProgressStatus() {
+        if (importedText.trim().isEmpty()) {
+            status("请先导入 txt 文本");
+            return;
+        }
+        if (textChunks.isEmpty()) textChunks.addAll(splitTextForTts(importedText));
+        List<Integer> marks = loadTextBookmarks();
+        String message = "当前进度：第 " + (currentTextChunk + 1) + " / " + Math.max(1, textChunks.size()) + " 段"
+                + "\n朗读书签：" + marks.size() + " 个"
+                + "\n章节识别：" + findTextChapters(importedText).size() + " 个";
+        new AlertDialog.Builder(this)
+                .setTitle("朗读进度")
+                .setMessage(message)
+                .setPositiveButton("确定", null)
+                .show();
+    }
+
+    private void repeatCurrentTextChunk() {
+        if (importedText.trim().isEmpty()) {
+            status("请先导入 txt 文本");
+            return;
+        }
+        if (textChunks.isEmpty()) textChunks.addAll(splitTextForTts(importedText));
+        currentTextChunk = Math.max(0, Math.min(currentTextChunk, Math.max(0, textChunks.size() - 1)));
+        if (!importedTextKey.isEmpty()) {
+            prefs.edit().putInt("ttsChunk:" + importedTextKey, currentTextChunk).apply();
+            startTextReaderService(TextReaderService.ACTION_START, importedTextKey);
+            status("已从当前段重新朗读");
+            return;
+        }
+        if (tts != null) {
+            tts.stop();
+            ttsPaused = false;
+            speakNextTextChunk();
+        }
+    }
+
     private void jumpToTextSearch(String query) {
         if (query.isEmpty()) {
             status("请输入搜索内容");
@@ -3046,14 +3289,21 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             return;
         }
         JSONArray array;
-        String raw = prefs.getString("textMarks:" + importedTextKey, "[]");
+        String raw = prefs.getString("textMarks:" + importedTextKey, dbGet("textMarks:" + importedTextKey, "[]"));
         try {
             array = new JSONArray(raw);
         } catch (JSONException ex) {
             array = new JSONArray();
         }
+        for (int i = 0; i < array.length(); i++) {
+            if (array.optInt(i, -1) == currentTextChunk) {
+                status("当前段已经有朗读书签");
+                return;
+            }
+        }
         array.put(currentTextChunk);
         prefs.edit().putString("textMarks:" + importedTextKey, array.toString()).apply();
+        dbPut("textMarks:" + importedTextKey, array.toString());
         status("已添加文本书签：第 " + (currentTextChunk + 1) + " 段");
     }
 
@@ -3092,7 +3342,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private List<Integer> loadTextBookmarks() {
         List<Integer> marks = new ArrayList<>();
-        String raw = prefs.getString("textMarks:" + importedTextKey, "[]");
+        String raw = prefs.getString("textMarks:" + importedTextKey, dbGet("textMarks:" + importedTextKey, "[]"));
         try {
             JSONArray array = new JSONArray(raw);
             for (int i = 0; i < array.length(); i++) {
@@ -3109,6 +3359,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         JSONArray array = new JSONArray();
         for (Integer mark : marks) array.put(mark);
         prefs.edit().putString("textMarks:" + importedTextKey, array.toString()).apply();
+        dbPut("textMarks:" + importedTextKey, array.toString());
     }
 
     private void showDeleteTextBookmarkDialog(List<Integer> marks) {
@@ -3356,11 +3607,77 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 .show();
     }
 
+    private void applyAudioPreset(String preset) {
+        int boost = 0;
+        int bass = 0;
+        int stereo = 0;
+        int[] eq = {1000, 1000, 1000, 1000, 1000};
+        String label = "默认";
+        if ("voice".equals(preset)) {
+            boost = 650;
+            bass = 120;
+            stereo = 180;
+            eq = new int[]{820, 940, 1320, 1260, 1080};
+            label = "人声";
+        } else if ("bass".equals(preset)) {
+            boost = 900;
+            bass = 720;
+            stereo = 260;
+            eq = new int[]{1450, 1300, 980, 920, 900};
+            label = "低音";
+        } else if ("clear".equals(preset)) {
+            boost = 500;
+            bass = 80;
+            stereo = 220;
+            eq = new int[]{900, 980, 1140, 1320, 1380};
+            label = "清晰";
+        } else if ("night".equals(preset)) {
+            boost = 260;
+            bass = 70;
+            stereo = 80;
+            eq = new int[]{960, 1000, 1060, 1040, 980};
+            label = "夜间";
+        } else if ("cinema".equals(preset)) {
+            boost = 1100;
+            bass = 520;
+            stereo = 640;
+            eq = new int[]{1280, 1120, 980, 1160, 1240};
+            label = "影院";
+        } else if ("study".equals(preset)) {
+            boost = 420;
+            bass = 40;
+            stereo = 120;
+            eq = new int[]{880, 980, 1280, 1200, 980};
+            label = "学习";
+        }
+        SharedPreferences.Editor editor = prefs.edit()
+                .putInt("boost", boost)
+                .putInt("bass", bass)
+                .putInt("stereo", stereo)
+                .putString("audioPreset", preset);
+        for (int i = 0; i < eq.length; i++) editor.putInt("eq:" + i, eq[i]);
+        editor.apply();
+        if (boostBar != null) boostBar.setProgress(boost);
+        if (bassBar != null) bassBar.setProgress(bass);
+        if (stereoBar != null) stereoBar.setProgress(stereo);
+        for (int i = 0; i < eqBars.size() && i < eq.length; i++) eqBars.get(i).setProgress(eq[i]);
+        applyAudioEffects();
+        status("已应用音效预设：" + label);
+    }
+
     private void resetAudioEffects() {
-        prefs.edit().putInt("boost", 0).putInt("bass", 0).putInt("stereo", 0).putInt("volume", 100).apply();
+        SharedPreferences.Editor editor = prefs.edit()
+                .putInt("boost", 0)
+                .putInt("bass", 0)
+                .putInt("stereo", 0)
+                .putInt("volume", 100)
+                .putString("audioPreset", "default");
+        for (int i = 0; i < 5; i++) editor.putInt("eq:" + i, 1000);
+        editor.apply();
         if (boostBar != null) boostBar.setProgress(0);
         if (bassBar != null) bassBar.setProgress(0);
         if (stereoBar != null) stereoBar.setProgress(0);
+        for (SeekBar eqBar : eqBars) eqBar.setProgress(1000);
         if (volumeBar != null) volumeBar.setProgress(100);
         if (player != null) player.setVolume(1f);
         applyAudioEffects();
@@ -3396,12 +3713,21 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     .putString(playlistMemoryUriKey(selectedPlaylist), entry.uri)
                     .putInt(playlistMemoryIndexKey(selectedPlaylist), currentIndex)
                     .apply();
+            dbPut("pos:" + entry.uri, String.valueOf(player.getCurrentPosition()));
+            dbPut("currentUri", entry.uri);
+            dbPut("selectedPlaylist", selectedPlaylist);
+            dbPut("currentIndex", String.valueOf(currentIndex));
+            dbPut(playlistMemoryUriKey(selectedPlaylist), entry.uri);
+            dbPut(playlistMemoryIndexKey(selectedPlaylist), String.valueOf(currentIndex));
         }
     }
 
     private void saveCurrentPositionAsZero() {
         MediaEntry entry = currentEntry();
-        if (entry != null) prefs.edit().putLong("pos:" + entry.uri, 0).apply();
+        if (entry != null) {
+            prefs.edit().putLong("pos:" + entry.uri, 0).apply();
+            dbPut("pos:" + entry.uri, "0");
+        }
     }
 
     @Nullable
@@ -3717,6 +4043,16 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         TimedTextLine(long timeMs, String text) {
             this.timeMs = timeMs;
             this.text = text == null ? "" : text;
+        }
+    }
+
+    private static class TextChapter {
+        final String title;
+        final int chunkIndex;
+
+        TextChapter(String title, int chunkIndex) {
+            this.title = title == null ? "" : title;
+            this.chunkIndex = Math.max(0, chunkIndex);
         }
     }
 
