@@ -105,6 +105,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private TextToSpeech tts;
 
     private LinearLayout rootLayout;
+    private LinearLayout advancedPanel;
     private PlayerView playerView;
     private ListView mediaList;
     private ArrayAdapter<String> mediaAdapter;
@@ -116,6 +117,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private TextView positionLabel;
     private TextView speedLabel;
     private TextView loopLabel;
+    private Button advancedToggleButton;
     private Button playPauseButton;
     private SeekBar positionBar;
     private SeekBar speedBar;
@@ -134,6 +136,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private boolean abEnabled = false;
     private boolean draggingPosition = false;
     private boolean fullScreenVideo = false;
+    private boolean advancedVisible = false;
     private boolean suppressPositionSave = false;
     private String selectedPlaylist = PLAYLIST_DEFAULT;
     private String searchQuery = "";
@@ -398,6 +401,14 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         rootLayout.addView(label("播放音量", 14, COLOR_SUBTLE));
         rootLayout.addView(volumeBar);
 
+        advancedToggleButton = btn("展开高级控制", v -> toggleAdvancedPanel());
+        rootLayout.addView(advancedToggleButton, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)));
+
+        advancedPanel = new LinearLayout(this);
+        advancedPanel.setOrientation(LinearLayout.VERTICAL);
+        advancedPanel.setVisibility(View.GONE);
+        rootLayout.addView(advancedPanel, fullWrap());
+
         boostBar = new SeekBar(this);
         boostBar.setMax(1500);
         boostBar.setProgress(prefs.getInt("boost", 0));
@@ -405,8 +416,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             prefs.edit().putInt("boost", progress).apply();
             applyAudioEffects();
         }));
-        rootLayout.addView(label("无损增益（不改源文件）", 14, COLOR_SUBTLE));
-        rootLayout.addView(boostBar);
+        advancedPanel.addView(label("无损增益（不改源文件）", 14, COLOR_SUBTLE));
+        advancedPanel.addView(boostBar);
 
         bassBar = new SeekBar(this);
         bassBar.setMax(1000);
@@ -415,8 +426,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             prefs.edit().putInt("bass", progress).apply();
             applyAudioEffects();
         }));
-        rootLayout.addView(label("低音增强", 14, COLOR_SUBTLE));
-        rootLayout.addView(bassBar);
+        advancedPanel.addView(label("低音增强", 14, COLOR_SUBTLE));
+        advancedPanel.addView(bassBar);
 
         stereoBar = new SeekBar(this);
         stereoBar.setMax(1000);
@@ -425,8 +436,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             prefs.edit().putInt("stereo", progress).apply();
             applyAudioEffects();
         }));
-        rootLayout.addView(label("立体感增强", 14, COLOR_SUBTLE));
-        rootLayout.addView(stereoBar);
+        advancedPanel.addView(label("立体感增强", 14, COLOR_SUBTLE));
+        advancedPanel.addView(stereoBar);
 
         loopLabel = label("", 14, COLOR_SUBTLE);
         rootLayout.addView(loopLabel);
@@ -436,7 +447,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 btn("B点", v -> setB()),
                 btn("清AB", v -> clearAb())
         ));
-        rootLayout.addView(row(
+        advancedPanel.addView(row(
                 btn("A-1秒", v -> adjustAbPoint(true, -1000)),
                 btn("A+1秒", v -> adjustAbPoint(true, 1000)),
                 btn("B-1秒", v -> adjustAbPoint(false, -1000)),
@@ -458,8 +469,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             prefs.edit().putInt("ttsRate", progress).apply();
             applyTtsSettings();
         }));
-        rootLayout.addView(label("朗读语速", 14, COLOR_SUBTLE));
-        rootLayout.addView(ttsRateBar);
+        advancedPanel.addView(label("朗读语速", 14, COLOR_SUBTLE));
+        advancedPanel.addView(ttsRateBar);
 
         ttsPitchBar = new SeekBar(this);
         ttsPitchBar.setMax(100);
@@ -468,8 +479,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             prefs.edit().putInt("ttsPitch", progress).apply();
             applyTtsSettings();
         }));
-        rootLayout.addView(label("朗读音调", 14, COLOR_SUBTLE));
-        rootLayout.addView(ttsPitchBar);
+        advancedPanel.addView(label("朗读音调", 14, COLOR_SUBTLE));
+        advancedPanel.addView(ttsPitchBar);
 
         bgVolumeBar = new SeekBar(this);
         bgVolumeBar.setMax(100);
@@ -478,8 +489,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             bgPlayer.setVolume(progress / 100f);
             prefs.edit().putInt("bgVolume", progress).apply();
         }));
-        rootLayout.addView(label("朗读背景音量", 14, COLOR_SUBTLE));
-        rootLayout.addView(bgVolumeBar);
+        advancedPanel.addView(label("朗读背景音量", 14, COLOR_SUBTLE));
+        advancedPanel.addView(bgVolumeBar);
 
         status = label("请选择文件夹开始扫描", 14, COLOR_SUBTLE);
         rootLayout.addView(status);
@@ -497,6 +508,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 playAt(queueIndex);
             }
         });
+        mediaList.setOnItemLongClickListener((parent, view, position, id) -> {
+            if (position < 0 || position >= visibleQueueIndexes.size()) return true;
+            showQueueItemActions(visibleQueueIndexes.get(position));
+            return true;
+        });
         rootLayout.addView(mediaList, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         setContentView(rootLayout);
@@ -505,6 +521,12 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         updateLoopLabel();
         updatePlayPauseButton();
         updatePositionUi();
+    }
+
+    private void toggleAdvancedPanel() {
+        advancedVisible = !advancedVisible;
+        if (advancedPanel != null) advancedPanel.setVisibility(advancedVisible ? View.VISIBLE : View.GONE);
+        if (advancedToggleButton != null) advancedToggleButton.setText(advancedVisible ? "收起高级控制" : "展开高级控制");
     }
 
     private void pickFolder() {
@@ -1075,6 +1097,12 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 && !name.startsWith("文件夹：");
     }
 
+    private boolean canReorderPlaylist(String name) {
+        return !PLAYLIST_ALL.equals(name)
+                && !PLAYLIST_RECENT.equals(name)
+                && !name.startsWith("文件夹：");
+    }
+
     private void addLibraryToPlaylist() {
         if (library.isEmpty()) {
             status("请先扫描文件夹");
@@ -1093,6 +1121,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             status("当前没有正在播放的文件");
             return;
         }
+        addEntryToFavorites(entry);
+    }
+
+    private void addEntryToFavorites(MediaEntry entry) {
         List<MediaEntry> favorites = playlists.computeIfAbsent(PLAYLIST_FAVORITES, key -> new ArrayList<>());
         if (containsUri(favorites, entry.uri)) {
             status("已在收藏中");
@@ -1114,6 +1146,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private void removeCurrentFromPlaylist() {
         MediaEntry entry = currentEntry();
+        removeEntryFromPlaylist(entry);
+    }
+
+    private void removeEntryFromPlaylist(MediaEntry entry) {
         List<MediaEntry> items = playlists.get(selectedPlaylist);
         if (entry == null || items == null || items.isEmpty()) {
             status("当前列表没有可移出的文件");
@@ -1131,6 +1167,48 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         } else {
             status("当前文件不在这个列表中");
         }
+    }
+
+    private void showQueueItemActions(int queueIndex) {
+        if (queueIndex < 0 || queueIndex >= queue.size()) return;
+        MediaEntry entry = queue.get(queueIndex);
+        String[] options = {"播放/暂停", "收藏", "移出当前列表", "上移", "下移"};
+        new AlertDialog.Builder(this)
+                .setTitle(entry.title)
+                .setItems(options, (dialog, which) -> {
+                    if (which == 0) {
+                        if (queueIndex == currentIndex) togglePlay(); else playAt(queueIndex);
+                    } else if (which == 1) {
+                        addEntryToFavorites(entry);
+                    } else if (which == 2) {
+                        removeEntryFromPlaylist(entry);
+                    } else if (which == 3) {
+                        moveQueueItem(queueIndex, -1);
+                    } else {
+                        moveQueueItem(queueIndex, 1);
+                    }
+                })
+                .show();
+    }
+
+    private void moveQueueItem(int queueIndex, int delta) {
+        if (!canReorderPlaylist(selectedPlaylist)) {
+            status("当前列表不支持手动排序");
+            return;
+        }
+        List<MediaEntry> items = playlists.get(selectedPlaylist);
+        if (items == null || queueIndex < 0 || queueIndex >= items.size()) return;
+        int target = queueIndex + delta;
+        if (target < 0 || target >= items.size()) {
+            status("已经到头了");
+            return;
+        }
+        Collections.swap(items, queueIndex, target);
+        if (currentIndex == queueIndex) currentIndex = target;
+        else if (currentIndex == target) currentIndex = queueIndex;
+        savePlaylists();
+        setQueue(items, false);
+        status("已调整顺序");
     }
 
     private void switchToPlaylist(String name) {
