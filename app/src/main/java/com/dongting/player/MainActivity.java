@@ -184,6 +184,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private String textSearchQuery = "";
     private int currentTextChunk = 0;
     private int videoRotation = 0;
+    private long timedTextOffsetMs = 0;
     private final List<String> textChunks = new ArrayList<>();
     private final List<TimedTextLine> timedTextLines = new ArrayList<>();
     private final List<Voice> voices = new ArrayList<>();
@@ -646,7 +647,13 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 btn("歌词/字幕", v -> pickTimedText()),
                 btn("清歌词", v -> clearTimedText()),
                 btn("搜文本", v -> showTextSearchDialog()),
-                btn("文本书签", v -> addTextBookmark())
+                btn("朗读书签", v -> showTextBookmarksDialog())
+        ));
+        advancedPanel.addView(row(
+                btn("字幕提前0.5", v -> adjustTimedTextOffset(-500)),
+                btn("字幕延后0.5", v -> adjustTimedTextOffset(500)),
+                btn("重置字幕偏移", v -> resetTimedTextOffset()),
+                btn("字幕状态", v -> showTimedTextStatus())
         ));
         voiceSpinner = new Spinner(this);
         controls.addView(voiceSpinner, fullWrap());
@@ -1002,6 +1009,12 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             runOnUiThread(() -> status("扫描中：已进入 " + dirs + " 个文件夹，找到 " + files + " 个音视频"));
         }
         DocumentFile[] files = dir.listFiles();
+        Map<String, DocumentFile> timedTextFiles = new HashMap<>();
+        for (DocumentFile file : files) {
+            if (file.isFile() && isTimedTextName(file.getName())) {
+                timedTextFiles.put(baseName(file.getName()), file);
+            }
+        }
         for (DocumentFile file : files) {
             if (file.isDirectory()) {
                 scanInto(file, file.getUri().toString(), output, folderBuckets, folderNames);
@@ -1015,6 +1028,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                         folderKey,
                         mediaTypeForFile(file)
                 );
+                DocumentFile sidecar = timedTextFiles.get(baseName(file.getName()));
+                if (sidecar != null) {
+                    prefs.edit().putString("timedSidecar:" + entry.uri, sidecar.getUri().toString()).apply();
+                }
                 output.add(entry);
                 scannedFileCount++;
                 if (scannedFileCount % 30 == 0) {
@@ -1169,6 +1186,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         setSpeed(folderSpeed, false);
         loadAb(entry.uri);
         loadTimedText(entry.uri);
+        resetVideoTransform();
         applyPlaybackMode();
         updateRecentPlaylist(entry);
         prefs.edit()
@@ -1417,12 +1435,13 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         String text = readText(uri);
         List<TimedTextLine> parsed = parseTimedText(text);
         if (parsed.isEmpty()) {
-            status("未识别到 LRC 歌词或 SRT 字幕时间轴");
+            status("未识别到时间轴，请确认是 [00:12.34] LRC 或 00:00:12,340 --> SRT");
             return;
         }
         timedTextLines.clear();
         timedTextLines.addAll(parsed);
         saveTimedText(entry.uri, timedTextLines);
+        prefs.edit().putString("timedSidecar:" + entry.uri, uri.toString()).apply();
         updateVisualStage();
         status("已导入歌词/字幕：" + timedTextLines.size() + " 行");
     }
@@ -1502,11 +1521,15 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             } catch (JSONException ignored) {
             }
         }
-        prefs.edit().putString("timed:" + mediaUri, array.toString()).apply();
+        prefs.edit()
+                .putString("timed:" + mediaUri, array.toString())
+                .putLong("timedSavedAt:" + mediaUri, System.currentTimeMillis())
+                .apply();
     }
 
     private void loadTimedText(String mediaUri) {
         timedTextLines.clear();
+        timedTextOffsetMs = prefs.getLong("timedOffset:" + mediaUri, 0);
         String raw = prefs.getString("timed:" + mediaUri, "[]");
         try {
             JSONArray array = new JSONArray(raw);
@@ -1516,11 +1539,29 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             }
         } catch (JSONException ignored) {
         }
+        if (timedTextLines.isEmpty()) {
+            String sidecar = prefs.getString("timedSidecar:" + mediaUri, "");
+            if (!sidecar.isEmpty()) {
+                List<TimedTextLine> parsed = parseTimedText(readText(Uri.parse(sidecar)));
+                if (!parsed.isEmpty()) {
+                    timedTextLines.addAll(parsed);
+                    saveTimedText(mediaUri, timedTextLines);
+                }
+            }
+        }
+        updateTimedTextUi(player == null ? 0 : player.getCurrentPosition());
     }
 
     private void clearTimedText() {
         MediaEntry entry = currentEntry();
-        if (entry != null) prefs.edit().remove("timed:" + entry.uri).apply();
+        if (entry != null) {
+            prefs.edit()
+                    .remove("timed:" + entry.uri)
+                    .remove("timedSidecar:" + entry.uri)
+                    .remove("timedOffset:" + entry.uri)
+                    .apply();
+        }
+        timedTextOffsetMs = 0;
         timedTextLines.clear();
         if (videoSubtitleLabel != null) videoSubtitleLabel.setText("");
         updateVisualStage();
@@ -1530,8 +1571,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private String currentTimedText(long positionMs) {
         if (timedTextLines.isEmpty()) return "";
         TimedTextLine current = null;
+        long adjusted = positionMs - timedTextOffsetMs;
         for (TimedTextLine line : timedTextLines) {
-            if (line.timeMs <= positionMs + 250) current = line; else break;
+            if (line.timeMs <= adjusted + 250) current = line; else break;
         }
         return current == null ? "" : current.text;
     }
@@ -1543,8 +1585,60 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private void rotateVideo() {
         videoRotation = (videoRotation + 90) % 360;
-        if (playerView != null) playerView.setRotation(videoRotation);
+        if (playerView != null) {
+            playerView.setRotation(videoRotation);
+            float scale = videoRotation == 90 || videoRotation == 270 ? 0.72f : 1f;
+            playerView.setScaleX(scale);
+            playerView.setScaleY(scale);
+        }
         status("视频旋转：" + videoRotation + "°");
+    }
+
+    private void resetVideoTransform() {
+        videoRotation = 0;
+        if (playerView != null) {
+            playerView.setRotation(0f);
+            playerView.setScaleX(1f);
+            playerView.setScaleY(1f);
+        }
+    }
+
+    private void adjustTimedTextOffset(long deltaMs) {
+        MediaEntry entry = currentEntry();
+        if (entry == null) {
+            status("当前没有媒体");
+            return;
+        }
+        timedTextOffsetMs += deltaMs;
+        prefs.edit().putLong("timedOffset:" + entry.uri, timedTextOffsetMs).apply();
+        updateTimedTextUi(player == null ? 0 : player.getCurrentPosition());
+        updateVisualStage();
+        status("字幕偏移：" + formatSignedMs(timedTextOffsetMs));
+    }
+
+    private void resetTimedTextOffset() {
+        MediaEntry entry = currentEntry();
+        timedTextOffsetMs = 0;
+        if (entry != null) prefs.edit().remove("timedOffset:" + entry.uri).apply();
+        updateTimedTextUi(player == null ? 0 : player.getCurrentPosition());
+        updateVisualStage();
+        status("字幕偏移已重置");
+    }
+
+    private void showTimedTextStatus() {
+        MediaEntry entry = currentEntry();
+        if (entry == null) {
+            status("当前没有媒体");
+            return;
+        }
+        String sidecar = prefs.getString("timedSidecar:" + entry.uri, "");
+        String message = "歌词/字幕：" + timedTextLines.size() + " 行\n偏移：" + formatSignedMs(timedTextOffsetMs)
+                + (sidecar.isEmpty() ? "\n未绑定外部文件" : "\n已绑定外部文件");
+        new AlertDialog.Builder(this)
+                .setTitle("歌词/字幕状态")
+                .setMessage(message)
+                .setPositiveButton("确定", null)
+                .show();
     }
 
     private void setupVideoGestures() {
@@ -2963,6 +3057,84 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         status("已添加文本书签：第 " + (currentTextChunk + 1) + " 段");
     }
 
+    private void showTextBookmarksDialog() {
+        if (importedText.trim().isEmpty()) {
+            status("请先导入 txt 文本");
+            return;
+        }
+        if (importedTextKey.isEmpty()) {
+            status("当前文本没有可保存的文件标识");
+            return;
+        }
+        List<Integer> marks = loadTextBookmarks();
+        List<String> labels = new ArrayList<>();
+        labels.add("添加当前段为书签（第 " + (currentTextChunk + 1) + " 段）");
+        for (int i = 0; i < marks.size(); i++) {
+            int chunkIndex = marks.get(i);
+            labels.add("跳转书签 " + (i + 1) + "：第 " + (chunkIndex + 1) + " 段  " + textChunkPreview(chunkIndex));
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("朗读书签")
+                .setItems(labels.toArray(new String[0]), (dialog, which) -> {
+                    if (which == 0) {
+                        addTextBookmark();
+                    } else {
+                        int index = marks.get(which - 1);
+                        currentTextChunk = index;
+                        prefs.edit().putInt("ttsChunk:" + importedTextKey, index).apply();
+                        updateVisualStage();
+                        status("已跳转到第 " + (index + 1) + " 段");
+                    }
+                })
+                .setNegativeButton("删除书签", (dialog, which) -> showDeleteTextBookmarkDialog(marks))
+                .show();
+    }
+
+    private List<Integer> loadTextBookmarks() {
+        List<Integer> marks = new ArrayList<>();
+        String raw = prefs.getString("textMarks:" + importedTextKey, "[]");
+        try {
+            JSONArray array = new JSONArray(raw);
+            for (int i = 0; i < array.length(); i++) {
+                int value = array.optInt(i, -1);
+                if (value >= 0 && !marks.contains(value)) marks.add(value);
+            }
+        } catch (JSONException ignored) {
+        }
+        Collections.sort(marks);
+        return marks;
+    }
+
+    private void saveTextBookmarks(List<Integer> marks) {
+        JSONArray array = new JSONArray();
+        for (Integer mark : marks) array.put(mark);
+        prefs.edit().putString("textMarks:" + importedTextKey, array.toString()).apply();
+    }
+
+    private void showDeleteTextBookmarkDialog(List<Integer> marks) {
+        if (marks.isEmpty()) {
+            status("还没有朗读书签");
+            return;
+        }
+        String[] labels = new String[marks.size()];
+        for (int i = 0; i < marks.size(); i++) labels[i] = "第 " + (marks.get(i) + 1) + " 段  " + textChunkPreview(marks.get(i));
+        new AlertDialog.Builder(this)
+                .setTitle("删除哪个朗读书签？")
+                .setItems(labels, (dialog, which) -> {
+                    int removed = marks.remove(which);
+                    saveTextBookmarks(marks);
+                    status("已删除第 " + (removed + 1) + " 段书签");
+                })
+                .show();
+    }
+
+    private String textChunkPreview(int index) {
+        if (textChunks.isEmpty()) textChunks.addAll(splitTextForTts(importedText));
+        if (index < 0 || index >= textChunks.size()) return "";
+        String chunk = textChunks.get(index).replace("\n", " ").trim();
+        return chunk.length() > 24 ? chunk.substring(0, 24) + "..." : chunk;
+    }
+
     private List<String> splitTextForTts(String text) {
         List<String> chunks = new ArrayList<>();
         String normalized = text.replace("\r\n", "\n").replace('\r', '\n').trim();
@@ -3249,6 +3421,20 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         return MediaUtils.isVideo(name);
     }
 
+    private boolean isTimedTextName(String name) {
+        if (name == null) return false;
+        String lower = name.toLowerCase(Locale.ROOT);
+        return lower.endsWith(".lrc") || lower.endsWith(".srt");
+    }
+
+    private String baseName(String name) {
+        if (name == null) return "";
+        int slash = Math.max(name.lastIndexOf('/'), name.lastIndexOf('\\'));
+        String clean = slash >= 0 ? name.substring(slash + 1) : name;
+        int dot = clean.lastIndexOf('.');
+        return (dot > 0 ? clean.substring(0, dot) : clean).trim().toLowerCase(Locale.ROOT);
+    }
+
     private String mediaTypeForUri(Uri uri, String fallbackName) {
         String mime = getContentResolver().getType(uri);
         if (mime != null) {
@@ -3323,6 +3509,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private String formatMs(long ms) {
         return MediaUtils.formatMs(ms);
+    }
+
+    private String formatSignedMs(long ms) {
+        String sign = ms > 0 ? "+" : ms < 0 ? "-" : "";
+        return sign + formatMs(Math.abs(ms));
     }
 
     private class DongtingVisualView extends View {

@@ -90,7 +90,7 @@ public class SettingsActivity extends AppCompatActivity {
                 check("视频播放时保持屏幕常亮", "videoKeepScreenOn", true),
                 check("视频全屏播放时自动隐藏控制台", "videoFullscreenControls", true),
                 check("视频全屏时填充画面", "videoFillScreen", false),
-                label("默认完整显示原比例，适合手机竖屏视频；开启填充画面会铺满屏幕但可能裁掉边缘。视频控制台支持导入 SRT 字幕和旋转画面。", 14, COLOR_SUBTLE));
+                label("默认完整显示原比例，适合手机竖屏视频；开启填充画面会铺满屏幕但可能裁掉边缘。视频控制台支持导入 SRT 字幕、同名字幕自动匹配、字幕偏移和旋转画面。", 14, COLOR_SUBTLE));
 
         addSection(root, "数据管理",
                 btn("清空最近播放", v -> {

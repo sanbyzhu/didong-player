@@ -129,7 +129,8 @@ def poster(size, name, title, subtitle, bullets, footer, kind="vertical"):
         draw.text((tx + 22, ty + 13), item, font=font(bullet_size, True), fill=ACC2)
         ty += 74 if kind != "wide" else 64
     draw_wave_line(draw, tx, min(h - 116, ty + 20), min(w - 60, tx + max_width), 12, seed=len(title))
-    draw.text((tx, h - 78), footer, font=font(24 if kind != "wide" else 21), fill=(255, 244, 226, 225))
+    if footer:
+        draw.text((tx, h - 78), footer, font=font(24 if kind != "wide" else 21), fill=(255, 244, 226, 225))
     img.convert("RGB").save(OUT / name, quality=95)
 
 
@@ -186,12 +187,12 @@ def write_copy():
     (OUT / "promo-copy.md").write_text(text, encoding="utf-8")
 
 
-poster((900, 383), "wechat-cover-900x383.png", "洞听播放器", "一个给本地音频、视频和 TXT 朗读准备的个人播放器", ["本地播放 · 文件夹列表", "8 倍速 · AB 循环 · 播放记忆", "TXT 朗读 · 背景音乐 · 树洞视觉"], "首发：公众号 小二菜园   微信/QQ：254850837", "wide")
-poster((1080, 1440), "wechat-article-card-1080x1440.png", "洞听播放器 v0.0.6", "由朱振坚个人利用 AI 在业余时间开发，仅供学习研究使用", ["音频/视频播放", "文件夹扫描自动成列表", "单曲/列表/AB 循环", "TXT 朗读与背景音乐", "树洞暖橘视觉舞台"], "莫要用于商业销售 · 祝大家学习愉快", "vertical")
-poster((1242, 1660), "xiaohongshu-cover-1242x1660.png", "我做了一个本地播放器", "能听歌、看视频，也能朗读 TXT", ["本地文件夹扫描", "播放记忆和倍速记忆", "AB 循环和书签", "朗读文字像歌词滚动", "暖橘树洞界面"], "洞听播放器 · 小二菜园", "vertical")
-poster((1242, 1660), "xiaohongshu-features-1242x1660.png", "洞听播放器能做什么？", "为学习、听课、听书和本地影音整理做的小工具", ["按文件夹自动生成播放列表", "音频/视频分开记忆倍速", "最高 8 倍速播放", "AB 循环适合复听重点", "通知栏后台播放控制"], "个人学习研究使用 · 微信/QQ 254850837", "vertical")
-poster((1080, 1080), "share-square-1080.png", "洞听播放器", "听歌 · 看视频 · 朗读 TXT", ["本地媒体库", "播放记忆", "倍速/循环/AB", "树洞视觉"], "公众号：小二菜园", "vertical")
-poster((1242, 1660), "notice-1242x1660.png", "开发说明", "洞听播放器由朱振坚个人利用 AI 在业余时间开发", ["仅供个人学习研究使用", "莫要用于商业销售", "首发在公众号：小二菜园", "微信和 QQ：254850837"], "祝大家学习愉快！", "vertical")
+poster((900, 383), "wechat-cover-900x383.png", "洞听播放器", "一个给本地音频、视频和 TXT 朗读准备的个人播放器", ["本地播放 · 文件夹列表", "8 倍速 · AB 循环 · 播放记忆", "TXT 朗读 · 背景音乐 · 树洞视觉"], "", "wide")
+poster((1080, 1440), "wechat-article-card-1080x1440.png", "洞听播放器 v0.0.7", "本地音频、视频和 TXT 朗读工具", ["音频/视频播放", "文件夹扫描自动成列表", "单曲/列表/AB 循环", "TXT 朗读与背景音乐", "树洞暖橘视觉舞台"], "", "vertical")
+poster((1242, 1660), "xiaohongshu-cover-1242x1660.png", "我做了一个本地播放器", "能听歌、看视频，也能朗读 TXT", ["本地文件夹扫描", "播放记忆和倍速记忆", "AB 循环和书签", "朗读文字像歌词滚动", "暖橘树洞界面"], "", "vertical")
+poster((1242, 1660), "xiaohongshu-features-1242x1660.png", "洞听播放器能做什么？", "为学习、听课、听书和本地影音整理做的小工具", ["按文件夹自动生成播放列表", "音频/视频分开记忆倍速", "最高 8 倍速播放", "AB 循环适合复听重点", "通知栏后台播放控制"], "", "vertical")
+poster((1080, 1080), "share-square-1080.png", "洞听播放器", "听歌 · 看视频 · 朗读 TXT", ["本地媒体库", "播放记忆", "倍速/循环/AB", "树洞视觉"], "", "vertical")
+poster((1242, 1660), "notice-1242x1660.png", "开发说明", "洞听播放器由朱振坚个人利用 AI 在业余时间开发", ["仅供个人学习研究使用", "莫要用于商业销售", "首发在公众号：小二菜园", "微信和 QQ：254850837"], "", "vertical")
 write_copy()
 
 for path in sorted(OUT.iterdir()):
