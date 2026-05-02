@@ -170,7 +170,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             mediaSession = playbackService.getMediaSession();
             playerView.setPlayer(player);
             attachPlayerListener();
-            restoreLastSession();
+            if (!restoreRunningPlayback()) restoreLastSession();
             processExternalIntent(getIntent());
             updatePlayPauseButton();
             updatePositionUi();
@@ -674,7 +674,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 title,
                 PLAYLIST_OPENED,
                 "opened",
-                isVideo(title) ? "video" : "audio"
+                mediaTypeForUri(uri, title)
         );
         ensureSmartPlaylists();
         List<MediaEntry> opened = playlists.computeIfAbsent(PLAYLIST_OPENED, key -> new ArrayList<>());
@@ -808,7 +808,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                         file.getName() == null ? "未命名" : file.getName(),
                         folderName,
                         folderKey,
-                        isVideo(file.getName()) ? "video" : "audio"
+                        mediaTypeForFile(file)
                 );
                 output.add(entry);
                 folderBuckets.computeIfAbsent(folderName, key -> new ArrayList<>()).add(entry);
@@ -1930,6 +1930,68 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         status("已恢复上次播放：" + entry.title);
     }
 
+    private boolean restoreRunningPlayback() {
+        if (player == null || player.getMediaItemCount() <= 0 || player.getCurrentMediaItem() == null) return false;
+        String currentUri = "";
+        if (player.getCurrentMediaItem().localConfiguration != null) {
+            currentUri = player.getCurrentMediaItem().localConfiguration.uri.toString();
+        }
+        if (currentUri.isEmpty()) return false;
+
+        List<MediaEntry> items = playlists.get(selectedPlaylist);
+        int restoredIndex = indexOfUri(items, currentUri);
+        if (restoredIndex < 0) {
+            for (Map.Entry<String, List<MediaEntry>> playlist : playlists.entrySet()) {
+                int found = indexOfUri(playlist.getValue(), currentUri);
+                if (found >= 0) {
+                    selectedPlaylist = playlist.getKey();
+                    items = playlist.getValue();
+                    restoredIndex = found;
+                    break;
+                }
+            }
+        }
+        if (restoredIndex < 0 || items == null || items.isEmpty()) {
+            items = entriesFromPlayerQueue();
+            restoredIndex = Math.max(0, Math.min(player.getCurrentMediaItemIndex(), items.size() - 1));
+        }
+        if (items.isEmpty()) return false;
+
+        queue.clear();
+        queue.addAll(new ArrayList<>(items));
+        currentIndex = restoredIndex;
+        MediaEntry entry = queue.get(currentIndex);
+        nowPlaying.setText(entry.title + "\n" + entry.folderName);
+        loadAb(entry.uri);
+        refreshPlaylistSpinner();
+        refreshMediaList();
+        updateVideoKeepScreenOn();
+        status(player.isPlaying() ? "已回到正在播放：" + entry.title : "已回到播放器：" + entry.title);
+        return true;
+    }
+
+    private int indexOfUri(@Nullable List<MediaEntry> items, String uri) {
+        if (items == null) return -1;
+        for (int i = 0; i < items.size(); i++) {
+            if (items.get(i).uri.equals(uri)) return i;
+        }
+        return -1;
+    }
+
+    private List<MediaEntry> entriesFromPlayerQueue() {
+        List<MediaEntry> items = new ArrayList<>();
+        if (player == null) return items;
+        for (int i = 0; i < player.getMediaItemCount(); i++) {
+            MediaItem item = player.getMediaItemAt(i);
+            if (item.localConfiguration == null) continue;
+            Uri uri = item.localConfiguration.uri;
+            String title = item.mediaMetadata.title == null ? displayName(uri) : String.valueOf(item.mediaMetadata.title);
+            String folder = item.mediaMetadata.artist == null ? PLAYLIST_OPENED : String.valueOf(item.mediaMetadata.artist);
+            items.add(new MediaEntry(uri.toString(), title, folder, "running", mediaTypeForUri(uri, title)));
+        }
+        return items;
+    }
+
     private void savePlaylists() {
         try {
             JSONObject root = new JSONObject();
@@ -2302,6 +2364,26 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private boolean isVideo(String name) {
         return MediaUtils.isVideo(name);
+    }
+
+    private String mediaTypeForUri(Uri uri, String fallbackName) {
+        String mime = getContentResolver().getType(uri);
+        if (mime != null) {
+            String lower = mime.toLowerCase(Locale.ROOT);
+            if (lower.startsWith("video/")) return "video";
+            if (lower.startsWith("audio/")) return "audio";
+        }
+        return isVideo(fallbackName) ? "video" : "audio";
+    }
+
+    private String mediaTypeForFile(DocumentFile file) {
+        String mime = file.getType();
+        if (mime != null) {
+            String lower = mime.toLowerCase(Locale.ROOT);
+            if (lower.startsWith("video/")) return "video";
+            if (lower.startsWith("audio/")) return "audio";
+        }
+        return isVideo(file.getName()) ? "video" : "audio";
     }
 
     private LinearLayout row(View... views) {
