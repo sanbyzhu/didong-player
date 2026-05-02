@@ -24,6 +24,7 @@ import android.provider.OpenableColumns;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 import android.speech.tts.Voice;
+import android.graphics.Typeface;
 import android.text.Editable;
 import android.text.TextWatcher;
 import android.view.Gravity;
@@ -121,8 +122,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private TextView positionLabel;
     private TextView speedLabel;
     private TextView loopLabel;
+    private TextView listSummary;
     private Button advancedToggleButton;
     private Button playPauseButton;
+    private Button mediaFilterButton;
     private SeekBar positionBar;
     private SeekBar speedBar;
     private SeekBar volumeBar;
@@ -143,9 +146,12 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private boolean advancedVisible = false;
     private boolean scanning = false;
     private boolean suppressPositionSave = false;
+    private boolean ttsPaused = false;
     private String selectedPlaylist = PLAYLIST_DEFAULT;
     private String searchQuery = "";
+    private String mediaFilter = "all";
     private String importedText = "";
+    private String importedTextKey = "";
     private int currentTextChunk = 0;
     private final List<String> textChunks = new ArrayList<>();
     private final List<Voice> voices = new ArrayList<>();
@@ -198,8 +204,17 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private final ActivityResultLauncher<Intent> textPicker =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
                 if (result.getResultCode() == RESULT_OK && result.getData() != null && result.getData().getData() != null) {
-                    importedText = readText(result.getData().getData());
-                    status("已导入文本：" + importedText.length() + " 字");
+                    Uri uri = result.getData().getData();
+                    int flags = result.getData().getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                    try {
+                        getContentResolver().takePersistableUriPermission(uri, flags);
+                    } catch (SecurityException ignored) {
+                    }
+                    importedText = readText(uri);
+                    importedTextKey = uri.toString();
+                    currentTextChunk = prefs.getInt("ttsChunk:" + importedTextKey, 0);
+                    prefs.edit().putString("lastTextUri", importedTextKey).apply();
+                    status("已导入文本：" + importedText.length() + " 字，进度已恢复到第 " + (currentTextChunk + 1) + " 段");
                 }
             });
 
@@ -218,8 +233,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         selectedPlaylist = prefs.getString("selectedPlaylist", PLAYLIST_DEFAULT);
         loopMode = prefs.getInt("loopMode", 0);
         advancedVisible = prefs.getBoolean("advancedVisible", false);
+        mediaFilter = prefs.getString("mediaFilter", "all");
         setupPlayers();
         setupUi();
+        restoreImportedText();
         requestNotificationPermission();
         loadPlaylists();
         tts = new TextToSpeech(this, this);
@@ -268,6 +285,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             @Override
             public void onIsPlayingChanged(boolean isPlaying) {
                 updatePlayPauseButton();
+                refreshMediaList();
                 if (playbackService != null) playbackService.refreshNotification();
             }
 
@@ -359,7 +377,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 btn("上一首", v -> playRelative(-1)),
                 btn("播放", v -> togglePlay()),
                 btn("下一首", v -> playRelative(1)),
-                btn("设置", v -> openAndroidSoundSettings())
+                btn("设置", v -> showSettingsDialog())
         );
         playPauseButton = (Button) playbackRow.getChildAt(1);
         playPauseButton.setTextSize(18);
@@ -380,6 +398,13 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 btn("移出列表", v -> removeCurrentFromPlaylist()),
                 btn("清搜索", v -> clearSearch())
         ));
+        mediaFilterButton = btn(filterButtonText(), v -> cycleMediaFilter());
+        rootLayout.addView(row(
+                mediaFilterButton,
+                btn("排序", v -> sortCurrentPlaylist(false)),
+                btn("倒序", v -> sortCurrentPlaylist(true)),
+                btn("加入列表", v -> showAddCurrentToPlaylistDialog())
+        ));
 
         playlistSpinner = new Spinner(this);
         rootLayout.addView(playlistSpinner, fullWrap());
@@ -396,6 +421,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             }
             @Override public void onNothingSelected(AdapterView<?> parent) { }
         });
+
+        listSummary = label("", 13, COLOR_SUBTLE);
+        rootLayout.addView(listSummary);
 
         searchBox = new EditText(this);
         searchBox.setSingleLine(true);
@@ -537,7 +565,20 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
         mediaList = new ListView(this);
         mediaList.setBackgroundColor(COLOR_PANEL);
-        mediaAdapter = new ArrayAdapter<>(this, android.R.layout.simple_list_item_1, new ArrayList<>());
+        mediaAdapter = new ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, new ArrayList<>()) {
+            @Override
+            public View getView(int position, View convertView, ViewGroup parent) {
+                TextView view = (TextView) super.getView(position, convertView, parent);
+                int queueIndex = position >= 0 && position < visibleQueueIndexes.size() ? visibleQueueIndexes.get(position) : -1;
+                boolean active = queueIndex == currentIndex;
+                view.setTextColor(active ? COLOR_ACCENT : COLOR_TEXT);
+                view.setTextSize(active ? 17 : 15);
+                view.setTypeface(Typeface.DEFAULT, active ? Typeface.BOLD : Typeface.NORMAL);
+                view.setPadding(dp(12), dp(8), dp(12), dp(8));
+                view.setBackgroundColor(active ? 0xFF22302D : COLOR_PANEL);
+                return view;
+            }
+        };
         mediaList.setAdapter(mediaAdapter);
         mediaList.setOnItemClickListener((parent, view, position, id) -> {
             if (position < 0 || position >= visibleQueueIndexes.size()) return;
@@ -743,21 +784,50 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private void refreshMediaList() {
         mediaAdapter.clear();
         visibleQueueIndexes.clear();
+        int audioCount = 0;
+        int videoCount = 0;
         for (int i = 0; i < queue.size(); i++) {
             MediaEntry entry = queue.get(i);
+            if ("video".equals(entry.type)) videoCount++; else audioCount++;
             if (!matchesSearch(entry)) continue;
             visibleQueueIndexes.add(i);
             String prefix = i == currentIndex ? "正在播放  " : "";
-            mediaAdapter.add(prefix + (entry.type.equals("video") ? "[视频] " : "[音频] ") + entry.title + "\n" + entry.folderName);
+            String state = i == currentIndex && player != null && player.isPlaying() ? " · 播放中" : "";
+            mediaAdapter.add(prefix + (entry.type.equals("video") ? "[视频] " : "[音频] ") + entry.title + "\n" + entry.folderName + state);
         }
         mediaAdapter.notifyDataSetChanged();
+        if (listSummary != null) {
+            String filter = "all".equals(mediaFilter) ? "全部" : "audio".equals(mediaFilter) ? "仅音频" : "仅视频";
+            listSummary.setText("当前列表 " + queue.size() + " 个文件（音频 " + audioCount + "，视频 " + videoCount + "） · 筛选：" + filter + " · 显示 " + visibleQueueIndexes.size());
+        }
     }
 
     private boolean matchesSearch(MediaEntry entry) {
+        if ("audio".equals(mediaFilter) && !"audio".equals(entry.type)) return false;
+        if ("video".equals(mediaFilter) && !"video".equals(entry.type)) return false;
         if (searchQuery == null || searchQuery.isEmpty()) return true;
         return entry.title.toLowerCase(Locale.ROOT).contains(searchQuery)
                 || entry.folderName.toLowerCase(Locale.ROOT).contains(searchQuery)
                 || entry.type.toLowerCase(Locale.ROOT).contains(searchQuery);
+    }
+
+    private void cycleMediaFilter() {
+        if ("all".equals(mediaFilter)) {
+            mediaFilter = "audio";
+        } else if ("audio".equals(mediaFilter)) {
+            mediaFilter = "video";
+        } else {
+            mediaFilter = "all";
+        }
+        prefs.edit().putString("mediaFilter", mediaFilter).apply();
+        if (mediaFilterButton != null) mediaFilterButton.setText(filterButtonText());
+        refreshMediaList();
+    }
+
+    private String filterButtonText() {
+        if ("audio".equals(mediaFilter)) return "仅音频";
+        if ("video".equals(mediaFilter)) return "仅视频";
+        return "全部媒体";
     }
 
     private void playAt(int index) {
@@ -887,21 +957,24 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void showSleepTimerDialog() {
-        String[] options = {"关闭定时", "15 分钟", "30 分钟", "60 分钟", "播完当前停止"};
+        String[] options = {"关闭定时", "15 分钟", "30 分钟", "60 分钟", "播完当前停止", "播完列表停止"};
         new AlertDialog.Builder(this)
                 .setTitle("睡眠定时")
                 .setItems(options, (dialog, which) -> {
                     handler.removeCallbacks(sleepTimer);
                     if (which == 0) {
-                        prefs.edit().remove("sleepAt").apply();
+                        prefs.edit().remove("sleepAt").putBoolean("stopAfterCurrent", false).putBoolean("stopAfterList", false).apply();
                         status("已关闭睡眠定时");
                     } else if (which == 4) {
-                        prefs.edit().putBoolean("stopAfterCurrent", true).apply();
+                        prefs.edit().putBoolean("stopAfterCurrent", true).putBoolean("stopAfterList", false).apply();
                         status("当前音频播放结束后停止");
+                    } else if (which == 5) {
+                        prefs.edit().putBoolean("stopAfterCurrent", false).putBoolean("stopAfterList", true).apply();
+                        status("当前列表播放结束后停止");
                     } else {
                         int minutes = which == 1 ? 15 : which == 2 ? 30 : 60;
                         long sleepAt = System.currentTimeMillis() + minutes * 60_000L;
-                        prefs.edit().putLong("sleepAt", sleepAt).putBoolean("stopAfterCurrent", false).apply();
+                        prefs.edit().putLong("sleepAt", sleepAt).putBoolean("stopAfterCurrent", false).putBoolean("stopAfterList", false).apply();
                         handler.postDelayed(sleepTimer, minutes * 60_000L);
                         status("将在 " + minutes + " 分钟后停止播放");
                     }
@@ -914,7 +987,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             if (player == null) return;
             player.pause();
             saveCurrentPosition();
-            prefs.edit().remove("sleepAt").putBoolean("stopAfterCurrent", false).apply();
+            prefs.edit().remove("sleepAt").putBoolean("stopAfterCurrent", false).putBoolean("stopAfterList", false).apply();
             updatePlayPauseButton();
             status("睡眠定时已停止播放");
         }
@@ -923,15 +996,21 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private void handleEnded() {
         if (player == null) return;
         saveCurrentPositionAsZero();
-        if (loopMode == 1) {
+        if (prefs.getBoolean("stopAfterCurrent", false)) {
+            prefs.edit().putBoolean("stopAfterCurrent", false).apply();
+            player.pause();
+            updatePlayPauseButton();
+            status("已播完当前文件并停止");
+        } else if (prefs.getBoolean("stopAfterList", false) && currentIndex >= queue.size() - 1) {
+            prefs.edit().putBoolean("stopAfterList", false).apply();
+            player.pause();
+            updatePlayPauseButton();
+            status("已播完当前列表并停止");
+        } else if (loopMode == 1) {
             player.seekTo(0);
             player.play();
         } else if (loopMode == 2 && !queue.isEmpty()) {
             playRelative(1);
-        } else if (prefs.getBoolean("stopAfterCurrent", false)) {
-            prefs.edit().putBoolean("stopAfterCurrent", false).apply();
-            player.pause();
-            updatePlayPauseButton();
         } else {
             updatePlayPauseButton();
         }
@@ -1374,6 +1453,43 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         status("已收藏：" + entry.title);
     }
 
+    private void showAddCurrentToPlaylistDialog() {
+        MediaEntry entry = currentEntry();
+        if (entry == null) {
+            status("当前没有正在播放的文件");
+            return;
+        }
+        showAddToPlaylistDialog(entry);
+    }
+
+    private void showAddToPlaylistDialog(MediaEntry entry) {
+        List<String> names = new ArrayList<>();
+        for (String name : playlists.keySet()) {
+            if (canEditPlaylist(name) || PLAYLIST_DEFAULT.equals(name)) names.add(name);
+        }
+        Collections.sort(names, collator);
+        if (names.isEmpty()) {
+            status("请先新建普通列表");
+            return;
+        }
+        String[] options = names.toArray(new String[0]);
+        new AlertDialog.Builder(this)
+                .setTitle("加入到列表：" + entry.title)
+                .setItems(options, (dialog, which) -> {
+                    String name = options[which];
+                    List<MediaEntry> items = playlists.computeIfAbsent(name, key -> new ArrayList<>());
+                    if (containsUri(items, entry.uri)) {
+                        status("该文件已在列表中：" + name);
+                        return;
+                    }
+                    items.add(entry);
+                    savePlaylists();
+                    refreshPlaylistSpinner();
+                    status("已加入：" + name);
+                })
+                .show();
+    }
+
     private void updateRecentPlaylist(MediaEntry entry) {
         List<MediaEntry> recent = playlists.computeIfAbsent(PLAYLIST_RECENT, key -> new ArrayList<>());
         removeUri(recent, entry.uri);
@@ -1410,7 +1526,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private void showQueueItemActions(int queueIndex) {
         if (queueIndex < 0 || queueIndex >= queue.size()) return;
         MediaEntry entry = queue.get(queueIndex);
-        String[] options = {"播放/暂停", "收藏", "移出当前列表", "上移", "下移"};
+        String[] options = {"播放/暂停", "收藏", "加入到列表", "移出当前列表", "上移", "下移"};
         new AlertDialog.Builder(this)
                 .setTitle(entry.title)
                 .setItems(options, (dialog, which) -> {
@@ -1419,8 +1535,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     } else if (which == 1) {
                         addEntryToFavorites(entry);
                     } else if (which == 2) {
-                        removeEntryFromPlaylist(entry);
+                        showAddToPlaylistDialog(entry);
                     } else if (which == 3) {
+                        removeEntryFromPlaylist(entry);
+                    } else if (which == 4) {
                         moveQueueItem(queueIndex, -1);
                     } else {
                         moveQueueItem(queueIndex, 1);
@@ -1589,7 +1707,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 @Override public void onStart(String utteranceId) { }
 
                 @Override public void onDone(String utteranceId) {
-                    runOnUiThread(() -> speakNextTextChunk());
+                    runOnUiThread(() -> {
+                        if (!ttsPaused) speakNextTextChunk();
+                    });
                 }
 
                 @Override public void onError(String utteranceId) {
@@ -1621,6 +1741,23 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         if (names.isEmpty()) names.add("系统默认人声");
         ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, names);
         voiceSpinner.setAdapter(adapter);
+        String savedVoice = prefs.getString("ttsVoice", "");
+        int selected = 0;
+        for (int i = 0; i < voices.size(); i++) {
+            if (voices.get(i).getName().equals(savedVoice)) {
+                selected = i;
+                break;
+            }
+        }
+        if (!voices.isEmpty()) voiceSpinner.setSelection(selected);
+        voiceSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
+                if (position >= 0 && position < voices.size()) {
+                    prefs.edit().putString("ttsVoice", voices.get(position).getName()).apply();
+                }
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) { }
+        });
     }
 
     private void pickText() {
@@ -1637,8 +1774,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         }
         if (tts == null) return;
         if (tts.isSpeaking()) {
-            tts.stop();
-            bgPlayer.pause();
+            stopSpeaking();
             return;
         }
         int selected = voiceSpinner.getSelectedItemPosition();
@@ -1646,7 +1782,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         applyTtsSettings();
         textChunks.clear();
         textChunks.addAll(splitTextForTts(importedText));
-        currentTextChunk = 0;
+        if (!importedTextKey.isEmpty()) {
+            currentTextChunk = Math.max(0, Math.min(prefs.getInt("ttsChunk:" + importedTextKey, currentTextChunk), Math.max(0, textChunks.size() - 1)));
+        }
+        ttsPaused = false;
         speakNextTextChunk();
         if (bgPlayer.getMediaItemCount() > 0) bgPlayer.play();
         status("开始朗读文本，共 " + textChunks.size() + " 段");
@@ -1656,11 +1795,14 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         if (tts == null) return;
         if (currentTextChunk >= textChunks.size()) {
             bgPlayer.pause();
+            if (!importedTextKey.isEmpty()) prefs.edit().putInt("ttsChunk:" + importedTextKey, 0).apply();
+            currentTextChunk = 0;
             status("文本朗读完成");
             return;
         }
         String chunk = textChunks.get(currentTextChunk);
         currentTextChunk++;
+        if (!importedTextKey.isEmpty()) prefs.edit().putInt("ttsChunk:" + importedTextKey, currentTextChunk - 1).apply();
         tts.speak(chunk, TextToSpeech.QUEUE_FLUSH, null, "dongting_text_" + currentTextChunk);
         status("朗读进度：" + currentTextChunk + "/" + textChunks.size());
     }
@@ -1696,9 +1838,16 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private void stopSpeaking() {
         if (tts != null) tts.stop();
-        textChunks.clear();
-        currentTextChunk = 0;
+        ttsPaused = true;
+        if (!importedTextKey.isEmpty()) prefs.edit().putInt("ttsChunk:" + importedTextKey, Math.max(0, currentTextChunk - 1)).apply();
         bgPlayer.pause();
+        status("朗读已暂停，进度已记忆");
+    }
+
+    private void resetTextProgress() {
+        currentTextChunk = 0;
+        if (!importedTextKey.isEmpty()) prefs.edit().putInt("ttsChunk:" + importedTextKey, 0).apply();
+        status("朗读进度已回到开头");
     }
 
     private void pickBackground() {
@@ -1726,6 +1875,19 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         } catch (Exception ex) {
             status("读取文本失败：" + ex.getMessage());
             return "";
+        }
+    }
+
+    private void restoreImportedText() {
+        String raw = prefs.getString("lastTextUri", "");
+        if (raw.isEmpty()) return;
+        Uri uri = Uri.parse(raw);
+        String restored = readText(uri);
+        if (!restored.isEmpty()) {
+            importedText = restored;
+            importedTextKey = raw;
+            currentTextChunk = prefs.getInt("ttsChunk:" + importedTextKey, 0);
+            status("已恢复上次导入的文本");
         }
     }
 
@@ -1766,6 +1928,52 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             } catch (RuntimeException ignored) {
             }
         }
+    }
+
+    private void showSettingsDialog() {
+        String[] options = {"系统声音设置", "恢复音效默认", "恢复朗读默认", "朗读从头开始", "清除当前播放位置", "关闭所有睡眠定时"};
+        new AlertDialog.Builder(this)
+                .setTitle("设置")
+                .setItems(options, (dialog, which) -> {
+                    if (which == 0) {
+                        openAndroidSoundSettings();
+                    } else if (which == 1) {
+                        resetAudioEffects();
+                    } else if (which == 2) {
+                        resetTtsSettings();
+                    } else if (which == 3) {
+                        resetTextProgress();
+                    } else if (which == 4) {
+                        clearCurrentPosition();
+                    } else {
+                        handler.removeCallbacks(sleepTimer);
+                        prefs.edit().remove("sleepAt").putBoolean("stopAfterCurrent", false).putBoolean("stopAfterList", false).apply();
+                        status("已关闭所有睡眠定时");
+                    }
+                })
+                .show();
+    }
+
+    private void resetAudioEffects() {
+        prefs.edit().putInt("boost", 0).putInt("bass", 0).putInt("stereo", 0).putInt("volume", 100).apply();
+        if (boostBar != null) boostBar.setProgress(0);
+        if (bassBar != null) bassBar.setProgress(0);
+        if (stereoBar != null) stereoBar.setProgress(0);
+        if (volumeBar != null) volumeBar.setProgress(100);
+        if (player != null) player.setVolume(1f);
+        applyAudioEffects();
+        status("音效已恢复默认");
+    }
+
+    private void resetTtsSettings() {
+        prefs.edit().putInt("ttsRate", 75).putInt("ttsPitch", 50).putInt("bgVolume", 25).remove("ttsVoice").apply();
+        if (ttsRateBar != null) ttsRateBar.setProgress(75);
+        if (ttsPitchBar != null) ttsPitchBar.setProgress(50);
+        if (bgVolumeBar != null) bgVolumeBar.setProgress(25);
+        if (voiceSpinner != null) voiceSpinner.setSelection(0);
+        applyTtsSettings();
+        bgPlayer.setVolume(0.25f);
+        status("朗读设置已恢复默认");
     }
 
     private void openAndroidSoundSettings() {
