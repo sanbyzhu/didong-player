@@ -120,6 +120,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private LinearLayout rootLayout;
     private LinearLayout advancedPanel;
+    private LinearLayout videoControlBar;
     private PlayerView playerView;
     private ListView mediaList;
     private ArrayAdapter<String> mediaAdapter;
@@ -136,6 +137,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private Button playPauseButton;
     private Button mediaFilterButton;
     private SeekBar positionBar;
+    private SeekBar videoControlSeekBar;
     private SeekBar speedBar;
     private SeekBar volumeBar;
     private SeekBar boostBar;
@@ -159,6 +161,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private float videoTouchStartX = 0f;
     private float videoTouchStartY = 0f;
     private boolean videoGestureHandled = false;
+    private boolean draggingVideoControl = false;
     private String selectedPlaylist = PLAYLIST_DEFAULT;
     private String searchQuery = "";
     private String mediaFilter = "all";
@@ -362,12 +365,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         playerView = new PlayerView(this);
         playerView.setPlayer(player);
         playerView.setUseController(false);
+        playerView.setControllerAutoShow(false);
+        playerView.setControllerShowTimeoutMs(3000);
         playerView.setBackgroundColor(0xFF050708);
         applyVideoResizeMode();
         setupVideoGestures();
-        playerView.setOnClickListener(v -> {
-            if (currentEntry() != null && "video".equals(currentEntry().type)) toggleFullScreenVideo();
-        });
         playerView.setOnTouchListener((view, event) -> {
             if (currentEntry() == null || !"video".equals(currentEntry().type)) return false;
             if (videoGestureDetector != null) videoGestureDetector.onTouchEvent(event);
@@ -375,6 +377,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             return true;
         });
         rootLayout.addView(playerView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(210)));
+        videoControlBar = buildVideoControlBar();
+        videoControlBar.setVisibility(View.GONE);
+        rootLayout.addView(videoControlBar, fullWrap());
 
         positionLabel = label("00:00 / 00:00", 13, COLOR_SUBTLE);
         positionLabel.setGravity(Gravity.CENTER);
@@ -644,6 +649,74 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         updatePlayPauseButton();
         updatePositionUi();
         applyPlaybackMode();
+    }
+
+    private LinearLayout buildVideoControlBar() {
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setBackgroundColor(0xDD101418);
+        panel.setPadding(dp(8), dp(6), dp(8), dp(8));
+
+        videoControlSeekBar = new SeekBar(this);
+        videoControlSeekBar.setMax(1000);
+        videoControlSeekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                if (fromUser && player != null && player.getDuration() > 0 && player.getDuration() != C.TIME_UNSET) {
+                    positionLabel.setText(formatMs(player.getDuration() * progress / 1000L) + " / " + formatMs(player.getDuration()));
+                }
+            }
+
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {
+                draggingVideoControl = true;
+            }
+
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {
+                if (player != null && player.getDuration() > 0 && player.getDuration() != C.TIME_UNSET) {
+                    player.seekTo(player.getDuration() * seekBar.getProgress() / 1000L);
+                    saveCurrentPosition();
+                }
+                draggingVideoControl = false;
+                showVideoController();
+            }
+        });
+        panel.addView(videoControlSeekBar);
+        panel.addView(row(
+                btn("播放/暂停", v -> {
+                    togglePlay();
+                    showVideoController();
+                }),
+                btn("快退15秒", v -> {
+                    seekBy(-15000);
+                    showVideoController();
+                }),
+                btn("快进30秒", v -> {
+                    seekBy(30000);
+                    showVideoController();
+                }),
+                btn("倍速", v -> showSpeedDialog())
+        ));
+        panel.addView(row(
+                btn("循环", v -> {
+                    cycleLoop();
+                    showVideoController();
+                }),
+                btn("A点", v -> {
+                    setA();
+                    showVideoController();
+                }),
+                btn("B点", v -> {
+                    setB();
+                    showVideoController();
+                }),
+                btn("清AB", v -> {
+                    clearAb();
+                    showVideoController();
+                }),
+                btn("退出", v -> {
+                    if (fullScreenVideo) toggleFullScreenVideo();
+                })
+        ));
+        return panel;
     }
 
     private void toggleAdvancedPanel() {
@@ -1178,7 +1251,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             float dx = event.getX() - videoTouchStartX;
             float dy = event.getY() - videoTouchStartY;
             if (Math.abs(dx) < dp(36) && Math.abs(dy) < dp(36)) {
-                toggleFullScreenVideo();
+                if (fullScreenVideo) {
+                    showVideoController();
+                } else {
+                    enterVideoFullScreen();
+                }
                 return;
             }
             if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > dp(80)) {
@@ -1218,25 +1295,27 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         fullscreenHiddenViews.clear();
         for (int i = 0; i < rootLayout.getChildCount(); i++) {
             View child = rootLayout.getChildAt(i);
-            if (child != playerView && fullScreenVideo) {
+            if (child != playerView && child != videoControlBar && fullScreenVideo) {
                 fullscreenHiddenViews.add(child);
                 child.setVisibility(View.GONE);
             } else if (!fullScreenVideo) {
                 child.setVisibility(View.VISIBLE);
             }
         }
+        if (videoControlBar != null) videoControlBar.setVisibility(fullScreenVideo ? View.VISIBLE : View.GONE);
         ViewGroup.LayoutParams params = playerView.getLayoutParams();
         params.height = fullScreenVideo ? ViewGroup.LayoutParams.MATCH_PARENT : dp(210);
         playerView.setLayoutParams(params);
         applyVideoResizeMode();
         rootLayout.setPadding(fullScreenVideo ? 0 : dp(10), fullScreenVideo ? 0 : dp(10), fullScreenVideo ? 0 : dp(10), fullScreenVideo ? 0 : dp(10));
-        setRequestedOrientation(fullScreenVideo ? ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE : ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+        setRequestedOrientation(fullScreenVideo ? ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR : ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
         getWindow().getDecorView().setSystemUiVisibility(fullScreenVideo
                 ? View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                 : View.SYSTEM_UI_FLAG_VISIBLE);
         playerView.setUseController(fullScreenVideo && prefs.getBoolean("videoFullscreenControls", true));
+        if (fullScreenVideo) showVideoController();
         updateVideoKeepScreenOn();
-        status(fullScreenVideo ? "已进入视频全屏，点画面或返回退出" : "已退出全屏");
+        status(fullScreenVideo ? "已进入视频全屏，点画面显示控制条，返回退出" : "已退出全屏");
     }
 
     private void updateVideoKeepScreenOn() {
@@ -1253,11 +1332,30 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private void applyVideoResizeMode() {
         if (playerView == null) return;
-        boolean fill = prefs.getBoolean("videoFillScreen", true);
+        boolean fill = prefs.getBoolean("videoFillScreen", false);
         playerView.setResizeMode(fullScreenVideo && fill
                 ? AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                 : AspectRatioFrameLayout.RESIZE_MODE_FIT);
     }
+
+    private void showVideoController() {
+        if (playerView == null || !prefs.getBoolean("videoFullscreenControls", true)) return;
+        playerView.setUseController(true);
+        playerView.showController();
+        if (videoControlBar != null && fullScreenVideo) {
+            videoControlBar.setVisibility(View.VISIBLE);
+            handler.removeCallbacks(hideVideoControls);
+            handler.postDelayed(hideVideoControls, player != null && player.isPlaying() ? 3500 : 7000);
+        }
+    }
+
+    private final Runnable hideVideoControls = new Runnable() {
+        @Override public void run() {
+            if (videoControlBar != null && fullScreenVideo && player != null && player.isPlaying() && !draggingVideoControl) {
+                videoControlBar.setVisibility(View.GONE);
+            }
+        }
+    };
 
     @Override
     public void onBackPressed() {
@@ -1336,10 +1434,13 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         long position = player.getCurrentPosition();
         if (duration <= 0 || duration == C.TIME_UNSET) {
             positionBar.setProgress(0);
+            if (videoControlSeekBar != null && !draggingVideoControl) videoControlSeekBar.setProgress(0);
             positionLabel.setText(formatMs(position) + " / 00:00");
             return;
         }
-        positionBar.setProgress((int) Math.max(0, Math.min(1000, position * 1000L / duration)));
+        int progress = (int) Math.max(0, Math.min(1000, position * 1000L / duration));
+        positionBar.setProgress(progress);
+        if (videoControlSeekBar != null && !draggingVideoControl) videoControlSeekBar.setProgress(progress);
         positionLabel.setText(formatMs(position) + " / " + formatMs(duration));
     }
 
