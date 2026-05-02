@@ -1,0 +1,7 @@
+<resources>
+    <color name="dt_bg">#101418</color>
+    <color name="dt_panel">#1A2027</color>
+    <color name="dt_text">#F3F6F8</color>
+    <color name="dt_subtle">#AAB4BF</color>
+    <color name="dt_accent">#35C2A6</color>
+</resources>

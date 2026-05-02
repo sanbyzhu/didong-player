@@ -1,0 +1,23 @@
+plugins {
+    id "com.android.application"
+}
+
+android {
+    namespace "com.dongting.player"
+    compileSdk 36
+
+    defaultConfig {
+        applicationId "com.dongting.player"
+        minSdk 26
+        targetSdk 36
+        versionCode 1
+        versionName "0.0.1"
+    }
+}
+
+dependencies {
+    implementation "androidx.appcompat:appcompat:1.7.1"
+    implementation "androidx.documentfile:documentfile:1.1.0"
+    implementation "androidx.media3:media3-exoplayer:1.10.0"
+    implementation "androidx.media3:media3-ui:1.10.0"
+}
