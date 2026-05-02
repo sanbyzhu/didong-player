@@ -158,6 +158,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private boolean scanning = false;
     private boolean suppressPositionSave = false;
     private boolean ttsPaused = false;
+    private int scannedFileCount = 0;
+    private int scannedDirCount = 0;
     private float videoTouchStartX = 0f;
     private float videoTouchStartY = 0f;
     private boolean videoGestureHandled = false;
@@ -570,7 +572,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         rootLayout.addView(row(
                 btn("导入TXT", v -> pickText()),
                 btn("朗读/暂停", v -> speakText()),
-                btn("停止朗读", v -> stopSpeaking()),
+                btn("朗读分段", v -> showTextChunksDialog()),
                 btn("背景音乐", v -> pickBackground())
         ));
         voiceSpinner = new Spinner(this);
@@ -685,6 +687,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     togglePlay();
                     showVideoController();
                 }),
+                btn(videoControlStatusText(), v -> showVideoController()),
                 btn("快退15秒", v -> {
                     seekBy(-15000);
                     showVideoController();
@@ -698,6 +701,13 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         panel.addView(row(
                 btn("循环", v -> {
                     cycleLoop();
+                    showVideoController();
+                }),
+                btn("适应/填充", v -> {
+                    boolean fill = !prefs.getBoolean("videoFillScreen", false);
+                    prefs.edit().putBoolean("videoFillScreen", fill).apply();
+                    applyVideoResizeMode();
+                    status(fill ? "视频全屏：填充画面" : "视频全屏：完整适应");
                     showVideoController();
                 }),
                 btn("A点", v -> {
@@ -717,6 +727,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 })
         ));
         return panel;
+    }
+
+    private String videoControlStatusText() {
+        String speed = player == null ? "1.00x" : String.format(Locale.CHINA, "%.2fx", player.getPlaybackParameters().speed);
+        return speed + " · " + playbackModeName();
     }
 
     private void toggleAdvancedPanel() {
@@ -824,6 +839,18 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         status("已清理失效文件：" + removed + " 个");
     }
 
+    private void cleanUnavailableFromAllPlaylists() {
+        int removed = 0;
+        for (List<MediaEntry> items : playlists.values()) {
+            removed += removeUnavailableEntries(items);
+        }
+        savePlaylists();
+        List<MediaEntry> current = playlists.get(selectedPlaylist);
+        currentIndex = -1;
+        setQueue(current == null ? new ArrayList<>() : current, false);
+        status("已全库清理失效文件：" + removed + " 个");
+    }
+
     private int removeUnavailableEntries(List<MediaEntry> items) {
         int removed = 0;
         for (int i = items.size() - 1; i >= 0; i--) {
@@ -846,6 +873,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             return;
         }
         scanning = true;
+        scannedFileCount = 0;
+        scannedDirCount = 0;
         status("开始扫描文件夹...");
         new Thread(() -> {
             try {
@@ -885,6 +914,12 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void scanInto(DocumentFile dir, String folderKey, List<MediaEntry> output, Map<String, List<MediaEntry>> folderBuckets, Map<String, String> folderNames) {
+        scannedDirCount++;
+        if (scannedDirCount % 8 == 0) {
+            int dirs = scannedDirCount;
+            int files = scannedFileCount;
+            runOnUiThread(() -> status("扫描中：已进入 " + dirs + " 个文件夹，找到 " + files + " 个音视频"));
+        }
         DocumentFile[] files = dir.listFiles();
         for (DocumentFile file : files) {
             if (file.isDirectory()) {
@@ -900,6 +935,12 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                         mediaTypeForFile(file)
                 );
                 output.add(entry);
+                scannedFileCount++;
+                if (scannedFileCount % 30 == 0) {
+                    int dirs = scannedDirCount;
+                    int count = scannedFileCount;
+                    runOnUiThread(() -> status("扫描中：已找到 " + count + " 个音视频，遍历 " + dirs + " 个文件夹"));
+                }
                 folderBuckets.computeIfAbsent(folderName, key -> new ArrayList<>()).add(entry);
             }
         }
@@ -1265,7 +1306,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 if (videoTouchStartX > playerView.getWidth() / 2f) {
                     adjustSystemVolume(dy < 0 ? 1 : -1);
                 } else {
-                    status(dy < 0 ? "亮度调高（系统限制下暂作提示）" : "亮度调低（系统限制下暂作提示）");
+                    adjustScreenBrightness(dy < 0 ? 0.08f : -0.08f);
                 }
             }
             videoGestureHandled = true;
@@ -1287,6 +1328,15 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 direction > 0 ? AudioManager.ADJUST_RAISE : AudioManager.ADJUST_LOWER,
                 AudioManager.FLAG_SHOW_UI);
         status(direction > 0 ? "音量调高" : "音量调低");
+    }
+
+    private void adjustScreenBrightness(float delta) {
+        WindowManager.LayoutParams attrs = getWindow().getAttributes();
+        float current = attrs.screenBrightness < 0 ? 0.5f : attrs.screenBrightness;
+        float next = Math.max(0.05f, Math.min(1f, current + delta));
+        attrs.screenBrightness = next;
+        getWindow().setAttributes(attrs);
+        status(String.format(Locale.CHINA, "亮度 %.0f%%", next * 100f));
     }
 
     private void toggleFullScreenVideo() {
@@ -1723,7 +1773,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void showPlaylistManager() {
-        String[] options = {"刷新上次文件夹", "按数字/名称排序当前列表", "倒序当前列表", "清理失效文件", "把扫描结果加入当前列表", "重命名当前列表", "删除当前列表", "清空最近播放"};
+        String[] options = {"刷新上次文件夹", "按数字/名称排序当前列表", "倒序当前列表", "清理当前列表失效文件", "全库清理失效文件", "批量操作当前列表", "把扫描结果加入当前列表", "重命名当前列表", "删除当前列表", "清空最近播放"};
         new AlertDialog.Builder(this)
                 .setTitle("列表管理：" + selectedPlaylist)
                 .setItems(options, (dialog, which) -> {
@@ -1736,10 +1786,14 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     } else if (which == 3) {
                         cleanUnavailableFromCurrentPlaylist();
                     } else if (which == 4) {
-                        addLibraryToPlaylist();
+                        cleanUnavailableFromAllPlaylists();
                     } else if (which == 5) {
-                        renameCurrentPlaylist();
+                        showPlaylistBulkActions();
                     } else if (which == 6) {
+                        addLibraryToPlaylist();
+                    } else if (which == 7) {
+                        renameCurrentPlaylist();
+                    } else if (which == 8) {
                         deleteCurrentPlaylist();
                     } else {
                         clearRecentPlaylist();
@@ -1825,6 +1879,67 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 })
                 .setNegativeButton("取消", null)
                 .show();
+    }
+
+    private void showPlaylistBulkActions() {
+        List<MediaEntry> items = playlists.get(selectedPlaylist);
+        if (items == null || items.isEmpty()) {
+            status("当前列表为空");
+            return;
+        }
+        String[] options = {"全部加入收藏", "移除重复文件", "只保留音频", "只保留视频"};
+        new AlertDialog.Builder(this)
+                .setTitle("批量操作：" + selectedPlaylist)
+                .setItems(options, (dialog, which) -> {
+                    if (which == 0) {
+                        List<MediaEntry> favorites = playlists.computeIfAbsent(PLAYLIST_FAVORITES, key -> new ArrayList<>());
+                        int added = 0;
+                        for (MediaEntry entry : items) {
+                            if (!containsUri(favorites, entry.uri)) {
+                                favorites.add(entry);
+                                added++;
+                            }
+                        }
+                        savePlaylists();
+                        status("已批量收藏：" + added + " 个");
+                    } else if (which == 1) {
+                        int removed = removeDuplicateEntries(items);
+                        savePlaylists();
+                        setQueue(items, false);
+                        status("已移除重复：" + removed + " 个");
+                    } else {
+                        String keepType = which == 2 ? "audio" : "video";
+                        int removed = removeOtherTypeEntries(items, keepType);
+                        savePlaylists();
+                        currentIndex = -1;
+                        setQueue(items, false);
+                        status("已移除不匹配文件：" + removed + " 个");
+                    }
+                })
+                .show();
+    }
+
+    private int removeDuplicateEntries(List<MediaEntry> items) {
+        Set<String> seen = new java.util.HashSet<>();
+        int removed = 0;
+        for (int i = items.size() - 1; i >= 0; i--) {
+            if (!seen.add(items.get(i).uri)) {
+                items.remove(i);
+                removed++;
+            }
+        }
+        return removed;
+    }
+
+    private int removeOtherTypeEntries(List<MediaEntry> items, String keepType) {
+        int removed = 0;
+        for (int i = items.size() - 1; i >= 0; i--) {
+            if (!keepType.equals(items.get(i).type)) {
+                items.remove(i);
+                removed++;
+            }
+        }
+        return removed;
     }
 
     private void clearRecentPlaylist() {
@@ -2354,6 +2469,29 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         if (!importedTextKey.isEmpty()) prefs.edit().putInt("ttsChunk:" + importedTextKey, currentTextChunk - 1).apply();
         tts.speak(chunk, TextToSpeech.QUEUE_FLUSH, null, "dongting_text_" + currentTextChunk);
         status("朗读进度：" + currentTextChunk + "/" + textChunks.size());
+    }
+
+    private void showTextChunksDialog() {
+        if (importedText.trim().isEmpty()) {
+            status("请先导入 txt 文本");
+            return;
+        }
+        List<String> chunks = splitTextForTts(importedText);
+        String[] labels = new String[chunks.size()];
+        for (int i = 0; i < chunks.size(); i++) {
+            String chunk = chunks.get(i).replace("\n", " ");
+            if (chunk.length() > 36) chunk = chunk.substring(0, 36) + "...";
+            labels[i] = "第 " + (i + 1) + " 段  " + chunk;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("朗读分段")
+                .setItems(labels, (dialog, which) -> {
+                    currentTextChunk = which;
+                    if (!importedTextKey.isEmpty()) prefs.edit().putInt("ttsChunk:" + importedTextKey, which).apply();
+                    speakText();
+                })
+                .setNegativeButton("停止朗读", (dialog, which) -> stopSpeaking())
+                .show();
     }
 
     private List<String> splitTextForTts(String text) {

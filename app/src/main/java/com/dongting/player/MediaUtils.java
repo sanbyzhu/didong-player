@@ -28,16 +28,20 @@ final class MediaUtils {
         String lower = name.toLowerCase(Locale.ROOT);
         return lower.endsWith(".mp3") || lower.endsWith(".m4a") || lower.endsWith(".aac")
                 || lower.endsWith(".flac") || lower.endsWith(".wav") || lower.endsWith(".ogg")
-                || lower.endsWith(".opus") || lower.endsWith(".mp4") || lower.endsWith(".mkv")
+                || lower.endsWith(".opus") || lower.endsWith(".amr") || lower.endsWith(".wma")
+                || lower.endsWith(".aiff") || lower.endsWith(".aif") || lower.endsWith(".mp4") || lower.endsWith(".mkv")
                 || lower.endsWith(".webm") || lower.endsWith(".3gp") || lower.endsWith(".mov")
-                || lower.endsWith(".avi");
+                || lower.endsWith(".avi") || lower.endsWith(".m4v") || lower.endsWith(".ts")
+                || lower.endsWith(".m2ts") || lower.endsWith(".flv") || lower.endsWith(".wmv");
     }
 
     static boolean isVideo(String name) {
         if (name == null) return false;
         String lower = name.toLowerCase(Locale.ROOT);
         return lower.endsWith(".mp4") || lower.endsWith(".mkv") || lower.endsWith(".webm")
-                || lower.endsWith(".3gp") || lower.endsWith(".mov") || lower.endsWith(".avi");
+                || lower.endsWith(".3gp") || lower.endsWith(".mov") || lower.endsWith(".avi")
+                || lower.endsWith(".m4v") || lower.endsWith(".ts") || lower.endsWith(".m2ts")
+                || lower.endsWith(".flv") || lower.endsWith(".wmv");
     }
 
     static String formatMs(long ms) {
