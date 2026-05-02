@@ -19,6 +19,7 @@ import android.os.IBinder;
 import android.os.Looper;
 import android.provider.Settings;
 import android.speech.tts.TextToSpeech;
+import android.speech.tts.UtteranceProgressListener;
 import android.speech.tts.Voice;
 import android.text.Editable;
 import android.text.TextWatcher;
@@ -73,6 +74,10 @@ import java.util.regex.Pattern;
 
 public class MainActivity extends AppCompatActivity implements TextToSpeech.OnInitListener {
     private static final String PREFS = "dongting_player";
+    private static final String PLAYLIST_DEFAULT = "默认列表";
+    private static final String PLAYLIST_ALL = "全部文件";
+    private static final String PLAYLIST_FAVORITES = "收藏";
+    private static final String PLAYLIST_RECENT = "最近播放";
     private static final int COLOR_BG = 0xFF101418;
     private static final int COLOR_PANEL = 0xFF1A2027;
     private static final int COLOR_TEXT = 0xFFF3F6F8;
@@ -124,9 +129,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private boolean abEnabled = false;
     private boolean draggingPosition = false;
     private boolean suppressPositionSave = false;
-    private String selectedPlaylist = "默认列表";
+    private String selectedPlaylist = PLAYLIST_DEFAULT;
     private String searchQuery = "";
     private String importedText = "";
+    private int currentTextChunk = 0;
+    private final List<String> textChunks = new ArrayList<>();
     private final List<Voice> voices = new ArrayList<>();
 
     private final ServiceConnection playbackConnection = new ServiceConnection() {
@@ -182,7 +189,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     protected void onCreate(@Nullable Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
-        selectedPlaylist = prefs.getString("selectedPlaylist", "默认列表");
+        selectedPlaylist = prefs.getString("selectedPlaylist", PLAYLIST_DEFAULT);
         setupPlayers();
         setupUi();
         requestNotificationPermission();
@@ -319,6 +326,13 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 btn("快进30秒", v -> seekBy(30000)),
                 btn("随机播放", v -> playRandom()),
                 btn("睡眠定时", v -> showSleepTimerDialog())
+        ));
+
+        root.addView(row(
+                btn("收藏当前", v -> addCurrentToFavorites()),
+                btn("最近播放", v -> switchToPlaylist(PLAYLIST_RECENT)),
+                btn("移出列表", v -> removeCurrentFromPlaylist()),
+                btn("清搜索", v -> clearSearch())
         ));
 
         playlistSpinner = new Spinner(this);
@@ -475,13 +489,14 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         Map<String, String> folderNames = new HashMap<>();
         scanInto(root, root.getUri().toString(), library, folderBuckets, folderNames);
         Collections.sort(library, this::compareMedia);
-        playlists.put("全部文件", new ArrayList<>(library));
+        ensureSmartPlaylists();
+        playlists.put(PLAYLIST_ALL, new ArrayList<>(library));
         for (Map.Entry<String, List<MediaEntry>> bucket : folderBuckets.entrySet()) {
             Collections.sort(bucket.getValue(), this::compareMedia);
             playlists.put("文件夹：" + bucket.getKey(), new ArrayList<>(bucket.getValue()));
         }
         savePlaylists();
-        selectedPlaylist = "全部文件";
+        selectedPlaylist = PLAYLIST_ALL;
         refreshPlaylistSpinner();
         setQueue(library, true);
         prefs.edit().putString("lastFolder", folderUri.toString()).apply();
@@ -579,6 +594,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         speedBar.setProgress(Math.round((folderSpeed - 0.25f) * 100f));
         setSpeed(folderSpeed, false);
         loadAb(entry.uri);
+        updateRecentPlaylist(entry);
         prefs.edit()
                 .putString("currentUri", entry.uri)
                 .putString("selectedPlaylist", selectedPlaylist)
@@ -857,9 +873,71 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         status("已加入 " + library.size() + " 个文件到：" + selectedPlaylist);
     }
 
+    private void addCurrentToFavorites() {
+        MediaEntry entry = currentEntry();
+        if (entry == null) {
+            status("当前没有正在播放的文件");
+            return;
+        }
+        List<MediaEntry> favorites = playlists.computeIfAbsent(PLAYLIST_FAVORITES, key -> new ArrayList<>());
+        if (containsUri(favorites, entry.uri)) {
+            status("已在收藏中");
+            return;
+        }
+        favorites.add(0, entry);
+        savePlaylists();
+        refreshPlaylistSpinner();
+        status("已收藏：" + entry.title);
+    }
+
+    private void updateRecentPlaylist(MediaEntry entry) {
+        List<MediaEntry> recent = playlists.computeIfAbsent(PLAYLIST_RECENT, key -> new ArrayList<>());
+        removeUri(recent, entry.uri);
+        recent.add(0, entry);
+        while (recent.size() > 100) recent.remove(recent.size() - 1);
+        savePlaylists();
+    }
+
+    private void removeCurrentFromPlaylist() {
+        MediaEntry entry = currentEntry();
+        List<MediaEntry> items = playlists.get(selectedPlaylist);
+        if (entry == null || items == null || items.isEmpty()) {
+            status("当前列表没有可移出的文件");
+            return;
+        }
+        if (PLAYLIST_ALL.equals(selectedPlaylist) || selectedPlaylist.startsWith("文件夹：")) {
+            status("自动列表来自扫描结果，不能手动移出；可以新建列表后管理");
+            return;
+        }
+        if (removeUri(items, entry.uri)) {
+            savePlaylists();
+            currentIndex = -1;
+            setQueue(items, false);
+            status("已从 " + selectedPlaylist + " 移出：" + entry.title);
+        } else {
+            status("当前文件不在这个列表中");
+        }
+    }
+
+    private void switchToPlaylist(String name) {
+        if (!playlists.containsKey(name)) playlists.put(name, new ArrayList<>());
+        selectedPlaylist = name;
+        refreshPlaylistSpinner();
+        List<MediaEntry> items = playlists.get(name);
+        currentIndex = -1;
+        setQueue(items == null ? new ArrayList<>() : items, false);
+        status("已切换列表：" + name);
+    }
+
+    private void clearSearch() {
+        searchQuery = "";
+        if (searchBox != null) searchBox.setText("");
+        refreshMediaList();
+    }
+
     private void loadPlaylists() {
         playlists.clear();
-        playlists.put("默认列表", new ArrayList<>());
+        playlists.put(PLAYLIST_DEFAULT, new ArrayList<>());
         String raw = prefs.getString("playlists", "{}");
         try {
             JSONObject root = new JSONObject(raw);
@@ -877,7 +955,14 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             }
         } catch (JSONException ignored) {
         }
+        ensureSmartPlaylists();
         refreshPlaylistSpinner();
+    }
+
+    private void ensureSmartPlaylists() {
+        playlists.computeIfAbsent(PLAYLIST_DEFAULT, key -> new ArrayList<>());
+        playlists.computeIfAbsent(PLAYLIST_FAVORITES, key -> new ArrayList<>());
+        playlists.computeIfAbsent(PLAYLIST_RECENT, key -> new ArrayList<>());
     }
 
     private void restoreLastSession() {
@@ -891,8 +976,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         }
 
         List<MediaEntry> items = playlists.get(selectedPlaylist);
-        if ((items == null || items.isEmpty()) && playlists.containsKey("全部文件")) {
-            selectedPlaylist = "全部文件";
+        if ((items == null || items.isEmpty()) && playlists.containsKey(PLAYLIST_ALL)) {
+            selectedPlaylist = PLAYLIST_ALL;
             items = playlists.get(selectedPlaylist);
         }
         if (items == null || items.isEmpty()) return;
@@ -947,10 +1032,41 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         playlistSpinner.setSelection(selected);
     }
 
+    private boolean containsUri(List<MediaEntry> entries, String uri) {
+        for (MediaEntry entry : entries) {
+            if (entry.uri.equals(uri)) return true;
+        }
+        return false;
+    }
+
+    private boolean removeUri(List<MediaEntry> entries, String uri) {
+        for (int i = entries.size() - 1; i >= 0; i--) {
+            if (entries.get(i).uri.equals(uri)) {
+                entries.remove(i);
+                return true;
+            }
+        }
+        return false;
+    }
+
     @Override
     public void onInit(int statusCode) {
         if (statusCode == TextToSpeech.SUCCESS) {
             tts.setLanguage(Locale.CHINA);
+            tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+                @Override public void onStart(String utteranceId) { }
+
+                @Override public void onDone(String utteranceId) {
+                    runOnUiThread(() -> speakNextTextChunk());
+                }
+
+                @Override public void onError(String utteranceId) {
+                    runOnUiThread(() -> {
+                        bgPlayer.pause();
+                        status("朗读中断");
+                    });
+                }
+            });
             refreshVoices();
         } else {
             status("系统 TTS 初始化失败");
@@ -997,13 +1113,52 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         if (selected >= 0 && selected < voices.size()) tts.setVoice(voices.get(selected));
         tts.setPitch(1.0f);
         tts.setSpeechRate(1.0f);
-        tts.speak(importedText, TextToSpeech.QUEUE_FLUSH, null, "dongting_text");
+        textChunks.clear();
+        textChunks.addAll(splitTextForTts(importedText));
+        currentTextChunk = 0;
+        speakNextTextChunk();
         if (bgPlayer.getMediaItemCount() > 0) bgPlayer.play();
-        status("开始朗读文本");
+        status("开始朗读文本，共 " + textChunks.size() + " 段");
+    }
+
+    private void speakNextTextChunk() {
+        if (tts == null) return;
+        if (currentTextChunk >= textChunks.size()) {
+            bgPlayer.pause();
+            status("文本朗读完成");
+            return;
+        }
+        String chunk = textChunks.get(currentTextChunk);
+        currentTextChunk++;
+        tts.speak(chunk, TextToSpeech.QUEUE_FLUSH, null, "dongting_text_" + currentTextChunk);
+        status("朗读进度：" + currentTextChunk + "/" + textChunks.size());
+    }
+
+    private List<String> splitTextForTts(String text) {
+        List<String> chunks = new ArrayList<>();
+        String normalized = text.replace("\r\n", "\n").replace('\r', '\n').trim();
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < normalized.length(); i++) {
+            char ch = normalized.charAt(i);
+            builder.append(ch);
+            boolean boundary = ch == '\n' || ch == '。' || ch == '！' || ch == '？' || ch == '.' || ch == '!' || ch == '?';
+            if (builder.length() >= 350 && boundary) {
+                chunks.add(builder.toString().trim());
+                builder.setLength(0);
+            } else if (builder.length() >= 700) {
+                chunks.add(builder.toString().trim());
+                builder.setLength(0);
+            }
+        }
+        if (builder.length() > 0) chunks.add(builder.toString().trim());
+        if (chunks.isEmpty()) chunks.add(normalized);
+        return chunks;
     }
 
     private void stopSpeaking() {
         if (tts != null) tts.stop();
+        textChunks.clear();
+        currentTextChunk = 0;
         bgPlayer.pause();
     }
 
