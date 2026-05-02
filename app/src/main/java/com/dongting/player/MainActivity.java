@@ -137,6 +137,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private boolean draggingPosition = false;
     private boolean fullScreenVideo = false;
     private boolean advancedVisible = false;
+    private boolean scanning = false;
     private boolean suppressPositionSave = false;
     private String selectedPlaylist = PLAYLIST_DEFAULT;
     private String searchQuery = "";
@@ -199,6 +200,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         super.onCreate(savedInstanceState);
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         selectedPlaylist = prefs.getString("selectedPlaylist", PLAYLIST_DEFAULT);
+        loopMode = prefs.getInt("loopMode", 0);
+        advancedVisible = prefs.getBoolean("advancedVisible", false);
         setupPlayers();
         setupUi();
         requestNotificationPermission();
@@ -406,7 +409,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
         advancedPanel = new LinearLayout(this);
         advancedPanel.setOrientation(LinearLayout.VERTICAL);
-        advancedPanel.setVisibility(View.GONE);
+        advancedPanel.setVisibility(advancedVisible ? View.VISIBLE : View.GONE);
         rootLayout.addView(advancedPanel, fullWrap());
 
         boostBar = new SeekBar(this);
@@ -522,6 +525,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         rootLayout.addView(mediaList, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
         setContentView(rootLayout);
+        advancedToggleButton.setText(advancedVisible ? "收起高级控制" : "展开高级控制");
         setSpeed((speedBar.getProgress() + 25) / 100f, false);
         bgPlayer.setVolume(bgVolumeBar.getProgress() / 100f);
         updateLoopLabel();
@@ -531,6 +535,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private void toggleAdvancedPanel() {
         advancedVisible = !advancedVisible;
+        prefs.edit().putBoolean("advancedVisible", advancedVisible).apply();
         if (advancedPanel != null) advancedPanel.setVisibility(advancedVisible ? View.VISIBLE : View.GONE);
         if (advancedToggleButton != null) advancedToggleButton.setText(advancedVisible ? "收起高级控制" : "展开高级控制");
     }
@@ -542,20 +547,44 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void scanFolder(Uri folderUri) {
+        if (scanning) {
+            status("正在扫描，请稍候");
+            return;
+        }
         DocumentFile root = DocumentFile.fromTreeUri(this, folderUri);
         if (root == null || !root.exists()) {
             status("无法读取该文件夹");
             return;
         }
+        scanning = true;
+        status("开始扫描文件夹...");
+        new Thread(() -> {
+            try {
+                List<MediaEntry> scannedLibrary = new ArrayList<>();
+                Map<String, List<MediaEntry>> folderBuckets = new LinkedHashMap<>();
+                Map<String, String> folderNames = new HashMap<>();
+                scanInto(root, root.getUri().toString(), scannedLibrary, folderBuckets, folderNames);
+                Collections.sort(scannedLibrary, this::compareMedia);
+                for (Map.Entry<String, List<MediaEntry>> bucket : folderBuckets.entrySet()) {
+                    Collections.sort(bucket.getValue(), this::compareMedia);
+                }
+                runOnUiThread(() -> applyScanResult(folderUri, scannedLibrary, folderBuckets));
+            } catch (RuntimeException ex) {
+                runOnUiThread(() -> {
+                    scanning = false;
+                    status("扫描失败：" + ex.getMessage());
+                });
+            }
+        }, "dongting-folder-scan").start();
+    }
+
+    private void applyScanResult(Uri folderUri, List<MediaEntry> scannedLibrary, Map<String, List<MediaEntry>> folderBuckets) {
+        scanning = false;
         library.clear();
-        Map<String, List<MediaEntry>> folderBuckets = new LinkedHashMap<>();
-        Map<String, String> folderNames = new HashMap<>();
-        scanInto(root, root.getUri().toString(), library, folderBuckets, folderNames);
-        Collections.sort(library, this::compareMedia);
+        library.addAll(scannedLibrary);
         ensureSmartPlaylists();
         playlists.put(PLAYLIST_ALL, new ArrayList<>(library));
         for (Map.Entry<String, List<MediaEntry>> bucket : folderBuckets.entrySet()) {
-            Collections.sort(bucket.getValue(), this::compareMedia);
             playlists.put("文件夹：" + bucket.getKey(), new ArrayList<>(bucket.getValue()));
         }
         savePlaylists();
@@ -863,6 +892,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private void cycleLoop() {
         loopMode = (loopMode + 1) % 3;
+        prefs.edit().putInt("loopMode", loopMode).apply();
         updateLoopLabel();
     }
 
