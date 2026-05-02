@@ -1,0 +1,291 @@
+package com.dongting.player;
+
+import android.app.Notification;
+import android.app.NotificationChannel;
+import android.app.NotificationManager;
+import android.app.PendingIntent;
+import android.app.Service;
+import android.content.Intent;
+import android.content.SharedPreferences;
+import android.net.Uri;
+import android.os.Build;
+import android.os.IBinder;
+import android.speech.tts.TextToSpeech;
+import android.speech.tts.UtteranceProgressListener;
+import android.speech.tts.Voice;
+
+import androidx.annotation.Nullable;
+import androidx.media3.common.AudioAttributes;
+import androidx.media3.common.C;
+import androidx.media3.common.MediaItem;
+import androidx.media3.exoplayer.ExoPlayer;
+
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Locale;
+import java.util.Set;
+
+public class TextReaderService extends Service implements TextToSpeech.OnInitListener {
+    static final String ACTION_START = "com.dongting.player.TEXT_START";
+    static final String ACTION_TOGGLE = "com.dongting.player.TEXT_TOGGLE";
+    static final String ACTION_STOP = "com.dongting.player.TEXT_STOP";
+
+    static final String EXTRA_TEXT_URI = "text_uri";
+
+    private static final String PREFS = "dongting_player";
+    private static final String CHANNEL_ID = "dongting_text_reader";
+    private static final int NOTIFICATION_ID = 20260503;
+
+    private final List<String> chunks = new ArrayList<>();
+    private SharedPreferences prefs;
+    private TextToSpeech tts;
+    private ExoPlayer bgPlayer;
+    private String textUri = "";
+    private String title = "TXT 朗读";
+    private int currentChunk = 0;
+    private boolean ready = false;
+    private boolean paused = false;
+
+    @Override
+    public void onCreate() {
+        super.onCreate();
+        prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
+        createNotificationChannel();
+        AudioAttributes attrs = new AudioAttributes.Builder()
+                .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
+                .setUsage(C.USAGE_MEDIA)
+                .build();
+        bgPlayer = new ExoPlayer.Builder(this).setAudioAttributes(attrs, true).build();
+        bgPlayer.setRepeatMode(androidx.media3.common.Player.REPEAT_MODE_ONE);
+        tts = new TextToSpeech(this, this);
+    }
+
+    @Override
+    public int onStartCommand(Intent intent, int flags, int startId) {
+        String action = intent == null ? null : intent.getAction();
+        if (ACTION_START.equals(action)) {
+            String uri = intent.getStringExtra(EXTRA_TEXT_URI);
+            if (uri != null && !uri.isEmpty()) {
+                textUri = uri;
+                title = readDisplayName(Uri.parse(uri));
+                currentChunk = Math.max(0, prefs.getInt("ttsChunk:" + textUri, 0));
+                paused = false;
+                loadText(Uri.parse(uri));
+                if (ready) speakCurrent();
+                updateNotification(true);
+            }
+        } else if (ACTION_TOGGLE.equals(action)) {
+            toggle();
+        } else if (ACTION_STOP.equals(action)) {
+            stopReading();
+        }
+        return START_STICKY;
+    }
+
+    @Nullable
+    @Override
+    public IBinder onBind(Intent intent) {
+        return null;
+    }
+
+    @Override
+    public void onInit(int status) {
+        ready = status == TextToSpeech.SUCCESS;
+        if (!ready) {
+            updateNotification(false);
+            return;
+        }
+        tts.setLanguage(Locale.CHINA);
+        applyTtsSettings();
+        tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
+            @Override public void onStart(String utteranceId) {
+            }
+
+            @Override public void onDone(String utteranceId) {
+                if (paused) return;
+                currentChunk++;
+                if (!textUri.isEmpty()) prefs.edit().putInt("ttsChunk:" + textUri, currentChunk).apply();
+                speakCurrent();
+            }
+
+            @Override public void onError(String utteranceId) {
+                pauseReading();
+            }
+        });
+        if (!textUri.isEmpty() && !chunks.isEmpty()) speakCurrent();
+    }
+
+    @Override
+    public void onDestroy() {
+        if (tts != null) {
+            tts.stop();
+            tts.shutdown();
+        }
+        if (bgPlayer != null) bgPlayer.release();
+        super.onDestroy();
+    }
+
+    private void loadText(Uri uri) {
+        chunks.clear();
+        String text = readText(uri);
+        chunks.addAll(splitTextForTts(text));
+        currentChunk = Math.min(currentChunk, Math.max(0, chunks.size() - 1));
+    }
+
+    private void speakCurrent() {
+        if (!ready || tts == null || chunks.isEmpty()) return;
+        if (currentChunk >= chunks.size()) {
+            if (!textUri.isEmpty()) prefs.edit().putInt("ttsChunk:" + textUri, 0).apply();
+            stopReading();
+            return;
+        }
+        paused = false;
+        applyTtsSettings();
+        startBackgroundMusic();
+        updateNotification(true);
+        tts.speak(chunks.get(currentChunk), TextToSpeech.QUEUE_FLUSH, null, "dongting_reader_" + currentChunk);
+    }
+
+    private void toggle() {
+        if (tts == null) return;
+        if (paused) {
+            speakCurrent();
+        } else {
+            pauseReading();
+        }
+    }
+
+    private void pauseReading() {
+        paused = true;
+        if (tts != null) tts.stop();
+        if (bgPlayer != null) bgPlayer.pause();
+        if (!textUri.isEmpty()) prefs.edit().putInt("ttsChunk:" + textUri, currentChunk).apply();
+        updateNotification(false);
+    }
+
+    private void stopReading() {
+        paused = true;
+        if (tts != null) tts.stop();
+        if (bgPlayer != null) bgPlayer.pause();
+        stopForeground(STOP_FOREGROUND_REMOVE);
+        stopSelf();
+    }
+
+    private void applyTtsSettings() {
+        if (tts == null) return;
+        float rate = 0.5f + (prefs.getInt("ttsRate", 75) / 100f);
+        float pitch = 0.5f + (prefs.getInt("ttsPitch", 50) / 100f);
+        tts.setSpeechRate(rate);
+        tts.setPitch(pitch);
+        String savedVoice = prefs.getString("ttsVoice", "");
+        Set<Voice> voices = tts.getVoices();
+        if (!savedVoice.isEmpty() && voices != null) {
+            for (Voice voice : voices) {
+                if (savedVoice.equals(voice.getName())) {
+                    tts.setVoice(voice);
+                    break;
+                }
+            }
+        }
+    }
+
+    private void startBackgroundMusic() {
+        String bgUri = prefs.getString("ttsBgUri", "");
+        if (bgUri.isEmpty() || bgPlayer == null) return;
+        if (bgPlayer.getMediaItemCount() == 0) {
+            bgPlayer.setMediaItem(MediaItem.fromUri(Uri.parse(bgUri)));
+            bgPlayer.prepare();
+        }
+        bgPlayer.setVolume(prefs.getInt("bgVolume", 25) / 100f);
+        bgPlayer.play();
+    }
+
+    private void updateNotification(boolean reading) {
+        Notification notification = buildNotification(reading);
+        if (reading) {
+            startForeground(NOTIFICATION_ID, notification);
+        } else {
+            NotificationManager manager = getSystemService(NotificationManager.class);
+            if (manager != null) manager.notify(NOTIFICATION_ID, notification);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) stopForeground(STOP_FOREGROUND_DETACH);
+        }
+    }
+
+    private Notification buildNotification(boolean reading) {
+        Intent openIntent = new Intent(this, MainActivity.class);
+        PendingIntent contentIntent = PendingIntent.getActivity(
+                this, 30, openIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        String progress = chunks.isEmpty() ? "准备朗读" : "第 " + Math.min(currentChunk + 1, chunks.size()) + "/" + chunks.size() + " 段";
+        Notification.Builder builder = new Notification.Builder(this)
+                .setContentTitle(title)
+                .setContentText((reading ? "正在朗读 · " : "已暂停 · ") + progress)
+                .setSmallIcon(R.drawable.ic_stat_dongting)
+                .setContentIntent(contentIntent)
+                .setOngoing(reading)
+                .setShowWhen(false)
+                .setOnlyAlertOnce(true)
+                .addAction(reading ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play,
+                        reading ? "暂停" : "继续", action(ACTION_TOGGLE, 31))
+                .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止", action(ACTION_STOP, 32));
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) builder.setChannelId(CHANNEL_ID);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) builder.setVisibility(Notification.VISIBILITY_PUBLIC);
+        return builder.build();
+    }
+
+    private PendingIntent action(String action, int requestCode) {
+        Intent intent = new Intent(this, TextReaderService.class).setAction(action);
+        return PendingIntent.getService(this, requestCode, intent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+    }
+
+    private void createNotificationChannel() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
+        NotificationChannel channel = new NotificationChannel(
+                CHANNEL_ID,
+                "洞听朗读",
+                NotificationManager.IMPORTANCE_LOW);
+        channel.setDescription("洞听播放器 TXT 后台朗读控制");
+        NotificationManager manager = getSystemService(NotificationManager.class);
+        if (manager != null) manager.createNotificationChannel(channel);
+    }
+
+    private String readText(Uri uri) {
+        try (InputStream input = getContentResolver().openInputStream(uri);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            if (input == null) return "";
+            byte[] buffer = new byte[4096];
+            int read;
+            while ((read = input.read(buffer)) != -1) output.write(buffer, 0, read);
+            return output.toString("UTF-8");
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    private String readDisplayName(Uri uri) {
+        String name = uri.getLastPathSegment();
+        return name == null || name.isEmpty() ? "TXT 朗读" : name;
+    }
+
+    private List<String> splitTextForTts(String text) {
+        List<String> result = new ArrayList<>();
+        String normalized = text.replace("\r\n", "\n").replace('\r', '\n').trim();
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < normalized.length(); i++) {
+            char ch = normalized.charAt(i);
+            builder.append(ch);
+            boolean boundary = ch == '\n' || ch == '。' || ch == '！' || ch == '？' || ch == '.' || ch == '!' || ch == '?';
+            if (builder.length() >= 350 && boundary) {
+                result.add(builder.toString().trim());
+                builder.setLength(0);
+            } else if (builder.length() >= 700) {
+                result.add(builder.toString().trim());
+                builder.setLength(0);
+            }
+        }
+        if (builder.length() > 0) result.add(builder.toString().trim());
+        if (result.isEmpty()) result.add(normalized);
+        return result;
+    }
+}

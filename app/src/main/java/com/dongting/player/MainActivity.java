@@ -221,6 +221,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
                 if (result.getResultCode() == RESULT_OK && result.getData() != null && result.getData().getData() != null) {
                     Uri uri = result.getData().getData();
+                    int flags = result.getData().getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                    try {
+                        getContentResolver().takePersistableUriPermission(uri, flags);
+                    } catch (SecurityException ignored) {
+                    }
                     startBackgroundMusic(uri);
                 }
             });
@@ -1910,6 +1915,18 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             status("请先导入 txt 文本");
             return;
         }
+        if (!importedTextKey.isEmpty()) {
+            Intent service = new Intent(this, TextReaderService.class)
+                    .setAction(TextReaderService.ACTION_START)
+                    .putExtra(TextReaderService.EXTRA_TEXT_URI, importedTextKey);
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                startForegroundService(service);
+            } else {
+                startService(service);
+            }
+            status("已交给后台朗读，可在通知栏暂停/继续/停止");
+            return;
+        }
         if (tts == null) return;
         if (tts.isSpeaking()) {
             stopSpeaking();
@@ -1975,6 +1992,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void stopSpeaking() {
+        stopService(new Intent(this, TextReaderService.class));
         if (tts != null) tts.stop();
         ttsPaused = true;
         if (!importedTextKey.isEmpty()) prefs.edit().putInt("ttsChunk:" + importedTextKey, Math.max(0, currentTextChunk - 1)).apply();
@@ -1999,6 +2017,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         bgPlayer.setMediaItem(MediaItem.fromUri(uri));
         bgPlayer.prepare();
         bgPlayer.setVolume(bgVolumeBar.getProgress() / 100f);
+        prefs.edit().putString("ttsBgUri", uri.toString()).apply();
         status("已设置朗读背景音乐");
     }
 
@@ -2069,19 +2088,21 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void showSettingsDialog() {
-        String[] options = {"系统声音设置", "恢复音效默认", "恢复朗读默认", "朗读从头开始", "清除当前播放位置", "关闭所有睡眠定时"};
+        String[] options = {"设置中心", "系统声音设置", "恢复音效默认", "恢复朗读默认", "朗读从头开始", "清除当前播放位置", "关闭所有睡眠定时"};
         new AlertDialog.Builder(this)
                 .setTitle("设置")
                 .setItems(options, (dialog, which) -> {
                     if (which == 0) {
-                        openAndroidSoundSettings();
+                        startActivity(new Intent(this, SettingsActivity.class));
                     } else if (which == 1) {
-                        resetAudioEffects();
+                        openAndroidSoundSettings();
                     } else if (which == 2) {
-                        resetTtsSettings();
+                        resetAudioEffects();
                     } else if (which == 3) {
-                        resetTextProgress();
+                        resetTtsSettings();
                     } else if (which == 4) {
+                        resetTextProgress();
+                    } else if (which == 5) {
                         clearCurrentPosition();
                     } else {
                         handler.removeCallbacks(sleepTimer);
