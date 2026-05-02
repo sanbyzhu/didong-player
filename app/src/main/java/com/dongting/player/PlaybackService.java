@@ -40,6 +40,7 @@ public class PlaybackService extends Service {
                 .setUsage(C.USAGE_MEDIA)
                 .build();
         player = new ExoPlayer.Builder(this).setAudioAttributes(attrs, true).build();
+        player.setHandleAudioBecomingNoisy(true);
         mediaSession = new MediaSession.Builder(this, player).build();
         player.addListener(new Player.Listener() {
             @Override public void onIsPlayingChanged(boolean isPlaying) {
@@ -114,17 +115,23 @@ public class PlaybackService extends Service {
                 this, 0, openIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
         String title = "洞听播放器";
+        String subtitle = player.isPlaying() ? "正在播放" : "已暂停";
         if (player.getCurrentMediaItem() != null && player.getCurrentMediaItem().mediaMetadata.title != null) {
             title = String.valueOf(player.getCurrentMediaItem().mediaMetadata.title);
+            if (player.getCurrentMediaItem().mediaMetadata.artist != null) {
+                subtitle = String.valueOf(player.getCurrentMediaItem().mediaMetadata.artist);
+            }
         }
 
         Notification.Builder builder = new Notification.Builder(this)
                 .setContentTitle(title)
-                .setContentText(player.isPlaying() ? "正在播放" : "已暂停")
-                .setSmallIcon(android.R.drawable.ic_media_play)
+                .setContentText(subtitle)
+                .setSmallIcon(R.drawable.ic_stat_dongting)
                 .setContentIntent(contentIntent)
+                .setDeleteIntent(action(ACTION_STOP, 5))
                 .setOngoing(player.isPlaying())
                 .setShowWhen(false)
+                .setOnlyAlertOnce(true)
                 .addAction(android.R.drawable.ic_media_previous, "上一首", action(ACTION_PREVIOUS, 1))
                 .addAction(player.isPlaying() ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play,
                         player.isPlaying() ? "暂停" : "播放", action(ACTION_TOGGLE, 2))

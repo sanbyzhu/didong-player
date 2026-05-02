@@ -9,6 +9,8 @@ import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.SharedPreferences;
 import android.media.audiofx.LoudnessEnhancer;
+import android.media.audiofx.BassBoost;
+import android.media.audiofx.Virtualizer;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -91,6 +93,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private ExoPlayer bgPlayer;
     private MediaSession mediaSession;
     private LoudnessEnhancer loudnessEnhancer;
+    private BassBoost bassBoost;
+    private Virtualizer virtualizer;
     private TextToSpeech tts;
 
     private PlayerView playerView;
@@ -109,6 +113,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private SeekBar speedBar;
     private SeekBar volumeBar;
     private SeekBar boostBar;
+    private SeekBar bassBar;
+    private SeekBar stereoBar;
     private SeekBar bgVolumeBar;
 
     private int currentIndex = -1;
@@ -374,10 +380,30 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         boostBar.setProgress(prefs.getInt("boost", 0));
         boostBar.setOnSeekBarChangeListener(simpleSeek((bar, progress, fromUser) -> {
             prefs.edit().putInt("boost", progress).apply();
-            applyBoost();
+            applyAudioEffects();
         }));
         root.addView(label("无损增益（不改源文件）", 14, COLOR_SUBTLE));
         root.addView(boostBar);
+
+        bassBar = new SeekBar(this);
+        bassBar.setMax(1000);
+        bassBar.setProgress(prefs.getInt("bass", 0));
+        bassBar.setOnSeekBarChangeListener(simpleSeek((bar, progress, fromUser) -> {
+            prefs.edit().putInt("bass", progress).apply();
+            applyAudioEffects();
+        }));
+        root.addView(label("低音增强", 14, COLOR_SUBTLE));
+        root.addView(bassBar);
+
+        stereoBar = new SeekBar(this);
+        stereoBar.setMax(1000);
+        stereoBar.setProgress(prefs.getInt("stereo", 0));
+        stereoBar.setOnSeekBarChangeListener(simpleSeek((bar, progress, fromUser) -> {
+            prefs.edit().putInt("stereo", progress).apply();
+            applyAudioEffects();
+        }));
+        root.addView(label("立体感增强", 14, COLOR_SUBTLE));
+        root.addView(stereoBar);
 
         loopLabel = label("", 14, COLOR_SUBTLE);
         root.addView(loopLabel);
@@ -1013,18 +1039,36 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         if (player == null) return;
         try {
             if (loudnessEnhancer != null) loudnessEnhancer.release();
+            if (bassBoost != null) bassBoost.release();
+            if (virtualizer != null) virtualizer.release();
             loudnessEnhancer = new LoudnessEnhancer(player.getAudioSessionId());
             loudnessEnhancer.setEnabled(true);
-            applyBoost();
+            bassBoost = new BassBoost(0, player.getAudioSessionId());
+            bassBoost.setEnabled(true);
+            virtualizer = new Virtualizer(0, player.getAudioSessionId());
+            virtualizer.setEnabled(true);
+            applyAudioEffects();
         } catch (RuntimeException ex) {
-            status("当前设备不支持响度增强");
+            status("当前设备不支持部分系统音效");
         }
     }
 
-    private void applyBoost() {
+    private void applyAudioEffects() {
         if (loudnessEnhancer != null) {
             try {
                 loudnessEnhancer.setTargetGain(boostBar.getProgress());
+            } catch (RuntimeException ignored) {
+            }
+        }
+        if (bassBoost != null) {
+            try {
+                bassBoost.setStrength((short) bassBar.getProgress());
+            } catch (RuntimeException ignored) {
+            }
+        }
+        if (virtualizer != null) {
+            try {
+                virtualizer.setStrength((short) stereoBar.getProgress());
             } catch (RuntimeException ignored) {
             }
         }
@@ -1167,6 +1211,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         handler.removeCallbacksAndMessages(null);
         saveCurrentPosition();
         if (loudnessEnhancer != null) loudnessEnhancer.release();
+        if (bassBoost != null) bassBoost.release();
+        if (virtualizer != null) virtualizer.release();
         if (playbackService != null) playbackService.refreshNotification();
         try {
             unbindService(playbackConnection);
