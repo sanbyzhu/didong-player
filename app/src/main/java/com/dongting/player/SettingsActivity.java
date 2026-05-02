@@ -19,8 +19,6 @@ import android.widget.Toast;
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
 
-import java.util.Map;
-
 public class SettingsActivity extends AppCompatActivity {
     private static final String PREFS = "dongting_player";
     private static final int COLOR_BG = 0xFF101418;
@@ -52,6 +50,7 @@ public class SettingsActivity extends AppCompatActivity {
         root.addView(label("把播放、朗读、视频和数据设置集中到这里。部分播放中的实时设置仍在主界面立即生效。", 13, COLOR_SUBTLE));
 
         addSection(root, "播放设置",
+                btn("恢复全部默认", v -> confirmResetAllDefaults()),
                 btn("关闭睡眠定时", v -> {
                     prefs.edit().remove("sleepAt").putBoolean("stopAfterCurrent", false).putBoolean("stopAfterList", false).apply();
                     toast("已关闭睡眠定时");
@@ -161,6 +160,34 @@ public class SettingsActivity extends AppCompatActivity {
                 .show();
     }
 
+    private void confirmResetAllDefaults() {
+        new AlertDialog.Builder(this)
+                .setTitle("恢复全部默认")
+                .setMessage("会恢复播放、音效、朗读和视频设置，不会删除列表和源文件。")
+                .setPositiveButton("恢复", (dialog, which) -> {
+                    prefs.edit()
+                            .putInt("volume", 100)
+                            .putInt("boost", 0)
+                            .putInt("bass", 0)
+                            .putInt("stereo", 0)
+                            .putInt("ttsRate", 75)
+                            .putInt("ttsPitch", 50)
+                            .putInt("bgVolume", 25)
+                            .putBoolean("videoKeepScreenOn", true)
+                            .putBoolean("videoFullscreenControls", true)
+                            .putFloat("lastSpeed", 1f)
+                            .remove("ttsVoice")
+                            .remove("sleepAt")
+                            .putBoolean("stopAfterCurrent", false)
+                            .putBoolean("stopAfterList", false)
+                            .apply();
+                    toast("已恢复全部默认，返回播放器后生效");
+                    recreate();
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
     private void confirmClearPlaylist(String name) {
         new AlertDialog.Builder(this)
                 .setTitle("清空" + name)
@@ -186,26 +213,11 @@ public class SettingsActivity extends AppCompatActivity {
     }
 
     private int clearKeysWithPrefix(String prefix) {
-        SharedPreferences.Editor editor = prefs.edit();
-        int count = 0;
-        for (Map.Entry<String, ?> entry : prefs.getAll().entrySet()) {
-            if (entry.getKey().startsWith(prefix)) {
-                editor.remove(entry.getKey());
-                count++;
-            }
-        }
-        editor.apply();
-        return count;
+        return PlaylistStore.clearKeysWithPrefix(prefs, prefix);
     }
 
     private void clearPlaylist(String name) {
-        String raw = prefs.getString("playlists", "{}");
-        try {
-            org.json.JSONObject root = new org.json.JSONObject(raw);
-            root.put(name, new org.json.JSONArray());
-            prefs.edit().putString("playlists", root.toString()).apply();
-        } catch (org.json.JSONException ignored) {
-        }
+        PlaylistStore.clearPlaylist(prefs, name);
     }
 
     private void openSoundSettings() {

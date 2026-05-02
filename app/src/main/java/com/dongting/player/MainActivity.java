@@ -13,6 +13,7 @@ import android.database.Cursor;
 import android.media.audiofx.LoudnessEnhancer;
 import android.media.audiofx.BassBoost;
 import android.media.audiofx.Virtualizer;
+import android.media.AudioManager;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
@@ -27,7 +28,9 @@ import android.speech.tts.Voice;
 import android.graphics.Typeface;
 import android.text.Editable;
 import android.text.TextWatcher;
+import android.view.GestureDetector;
 import android.view.Gravity;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
@@ -107,6 +110,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private BassBoost bassBoost;
     private Virtualizer virtualizer;
     private TextToSpeech tts;
+    private AudioManager audioManager;
+    private GestureDetector videoGestureDetector;
 
     private LinearLayout rootLayout;
     private LinearLayout advancedPanel;
@@ -146,6 +151,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private boolean scanning = false;
     private boolean suppressPositionSave = false;
     private boolean ttsPaused = false;
+    private float videoTouchStartX = 0f;
+    private float videoTouchStartY = 0f;
+    private boolean videoGestureHandled = false;
     private String selectedPlaylist = PLAYLIST_DEFAULT;
     private String searchQuery = "";
     private String mediaFilter = "all";
@@ -238,6 +246,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         loopMode = prefs.getInt("loopMode", 0);
         advancedVisible = prefs.getBoolean("advancedVisible", false);
         mediaFilter = prefs.getString("mediaFilter", "all");
+        audioManager = (AudioManager) getSystemService(Context.AUDIO_SERVICE);
         setupPlayers();
         setupUi();
         restoreImportedText();
@@ -342,8 +351,15 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         playerView.setPlayer(player);
         playerView.setUseController(false);
         playerView.setBackgroundColor(0xFF050708);
+        setupVideoGestures();
         playerView.setOnClickListener(v -> {
             if (currentEntry() != null && "video".equals(currentEntry().type)) toggleFullScreenVideo();
+        });
+        playerView.setOnTouchListener((view, event) -> {
+            if (currentEntry() == null || !"video".equals(currentEntry().type)) return false;
+            if (videoGestureDetector != null) videoGestureDetector.onTouchEvent(event);
+            handleVideoTouch(event);
+            return true;
         });
         rootLayout.addView(playerView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(210)));
 
@@ -648,6 +664,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void openMediaUri(Uri uri) {
+        if (!isUriReadable(uri)) {
+            status("文件不可用或授权已失效");
+            return;
+        }
         String title = displayName(uri);
         MediaEntry entry = new MediaEntry(
                 uri.toString(),
@@ -686,6 +706,44 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         if (path == null || path.trim().isEmpty()) return "打开的文件";
         int slash = path.lastIndexOf('/');
         return slash >= 0 ? path.substring(slash + 1) : path;
+    }
+
+    private boolean isEntryAvailable(MediaEntry entry) {
+        return entry != null && isUriReadable(Uri.parse(entry.uri));
+    }
+
+    private boolean isUriReadable(Uri uri) {
+        try (InputStream input = getContentResolver().openInputStream(uri)) {
+            return input != null;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    private void cleanUnavailableFromCurrentPlaylist() {
+        List<MediaEntry> items = playlists.get(selectedPlaylist);
+        if (items == null || items.isEmpty()) {
+            status("当前列表为空");
+            return;
+        }
+        int removed = removeUnavailableEntries(items);
+        if (removed > 0) {
+            savePlaylists();
+            currentIndex = -1;
+            setQueue(items, false);
+        }
+        status("已清理失效文件：" + removed + " 个");
+    }
+
+    private int removeUnavailableEntries(List<MediaEntry> items) {
+        int removed = 0;
+        for (int i = items.size() - 1; i >= 0; i--) {
+            if (!isEntryAvailable(items.get(i))) {
+                items.remove(i);
+                removed++;
+            }
+        }
+        return removed;
     }
 
     private void scanFolder(Uri folderUri) {
@@ -848,6 +906,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         saveCurrentPosition();
         currentIndex = index;
         MediaEntry entry = queue.get(index);
+        if (!isEntryAvailable(entry)) {
+            status("文件不可用：" + entry.title);
+            if (queue.size() > 1) playRelative(1);
+            return;
+        }
         suppressPositionSave = false;
         nowPlaying.setText(entry.title + "\n" + entry.folderName);
         if (player.getMediaItemCount() != queue.size()) syncPlayerQueue();
@@ -947,6 +1010,13 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         TextView title = label(entry.title, 20, COLOR_TEXT);
         title.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
         TextView subtitle = label(entry.folderName + " · " + ("video".equals(entry.type) ? "视频" : "音频"), 14, COLOR_SUBTLE);
+        TextView cover = label("耳朵在树洞里听见了声音\n" + ("video".equals(entry.type) ? "视频播放" : "音频播放"), 18, 0xFFFFC15A);
+        cover.setGravity(Gravity.CENTER);
+        cover.setTypeface(Typeface.DEFAULT, Typeface.BOLD);
+        cover.setBackgroundColor(0xFF2B2114);
+        cover.setPadding(dp(12), dp(24), dp(12), dp(24));
+        TextView abInfo = label("", 14, COLOR_SUBTLE);
+        TextView bookmarkInfo = label("", 14, COLOR_SUBTLE);
         TextView progressText = label("00:00 / 00:00", 14, COLOR_SUBTLE);
         progressText.setGravity(Gravity.CENTER);
         SeekBar dialogSeek = new SeekBar(this);
@@ -980,6 +1050,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         Button speedButton = btn(String.format(Locale.CHINA, "%.2fx", player == null ? 1f : player.getPlaybackParameters().speed), v -> showSpeedDialog());
         panel.addView(title);
         panel.addView(subtitle);
+        panel.addView(cover, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(120)));
+        panel.addView(abInfo);
+        panel.addView(bookmarkInfo);
         panel.addView(progressText);
         panel.addView(dialogSeek);
         panel.addView(row(
@@ -1016,7 +1089,14 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 if (current != null) {
                     title.setText(current.title);
                     subtitle.setText(current.folderName + " · " + ("video".equals(current.type) ? "视频" : "音频"));
+                    cover.setText("video".equals(current.type) ? "视频画面正在洞听" : "耳朵在树洞里听见了声音");
+                    List<Bookmark> marks = loadBookmarks(current.uri);
+                    bookmarkInfo.setText("书签：" + marks.size() + " 个");
                 }
+                String ab = abEnabled && abA != C.TIME_UNSET && abB != C.TIME_UNSET
+                        ? "AB 循环：" + formatMs(abA) + " - " + formatMs(abB)
+                        : "AB 循环：未开启";
+                abInfo.setText(ab);
                 if (player != null) {
                     long duration = player.getDuration();
                     long position = player.getCurrentPosition();
@@ -1051,6 +1131,51 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     setSpeed(speed, true);
                 })
                 .show();
+    }
+
+    private void setupVideoGestures() {
+        videoGestureDetector = new GestureDetector(this, new GestureDetector.SimpleOnGestureListener() {
+            @Override public boolean onDoubleTap(MotionEvent e) {
+                togglePlay();
+                status(player != null && player.isPlaying() ? "视频继续播放" : "视频已暂停");
+                return true;
+            }
+        });
+    }
+
+    private void handleVideoTouch(MotionEvent event) {
+        if (player == null) return;
+        if (event.getAction() == MotionEvent.ACTION_DOWN) {
+            videoTouchStartX = event.getX();
+            videoTouchStartY = event.getY();
+            videoGestureHandled = false;
+        } else if (event.getAction() == MotionEvent.ACTION_UP && !videoGestureHandled) {
+            float dx = event.getX() - videoTouchStartX;
+            float dy = event.getY() - videoTouchStartY;
+            if (Math.abs(dx) < dp(36) && Math.abs(dy) < dp(36)) {
+                toggleFullScreenVideo();
+                return;
+            }
+            if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > dp(80)) {
+                seekBy(dx > 0 ? 10000 : -10000);
+                status(dx > 0 ? "快进 10 秒" : "快退 10 秒");
+            } else if (Math.abs(dy) > dp(80)) {
+                if (videoTouchStartX > playerView.getWidth() / 2f) {
+                    adjustSystemVolume(dy < 0 ? 1 : -1);
+                } else {
+                    status(dy < 0 ? "亮度调高（系统限制下暂作提示）" : "亮度调低（系统限制下暂作提示）");
+                }
+            }
+            videoGestureHandled = true;
+        }
+    }
+
+    private void adjustSystemVolume(int direction) {
+        if (audioManager == null) return;
+        audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC,
+                direction > 0 ? AudioManager.ADJUST_RAISE : AudioManager.ADJUST_LOWER,
+                AudioManager.FLAG_SHOW_UI);
+        status(direction > 0 ? "音量调高" : "音量调低");
     }
 
     private void toggleFullScreenVideo() {
@@ -1436,7 +1561,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void showPlaylistManager() {
-        String[] options = {"刷新上次文件夹", "按数字/名称排序当前列表", "倒序当前列表", "把扫描结果加入当前列表", "重命名当前列表", "删除当前列表", "清空最近播放"};
+        String[] options = {"刷新上次文件夹", "按数字/名称排序当前列表", "倒序当前列表", "清理失效文件", "把扫描结果加入当前列表", "重命名当前列表", "删除当前列表", "清空最近播放"};
         new AlertDialog.Builder(this)
                 .setTitle("列表管理：" + selectedPlaylist)
                 .setItems(options, (dialog, which) -> {
@@ -1447,10 +1572,12 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     } else if (which == 2) {
                         sortCurrentPlaylist(true);
                     } else if (which == 3) {
-                        addLibraryToPlaylist();
+                        cleanUnavailableFromCurrentPlaylist();
                     } else if (which == 4) {
-                        renameCurrentPlaylist();
+                        addLibraryToPlaylist();
                     } else if (which == 5) {
+                        renameCurrentPlaylist();
+                    } else if (which == 6) {
                         deleteCurrentPlaylist();
                     } else {
                         clearRecentPlaylist();

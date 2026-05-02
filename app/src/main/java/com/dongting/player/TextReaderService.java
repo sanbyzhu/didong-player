@@ -34,6 +34,7 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
     static final String ACTION_TOGGLE = "com.dongting.player.TEXT_TOGGLE";
     static final String ACTION_PREVIOUS = "com.dongting.player.TEXT_PREVIOUS";
     static final String ACTION_NEXT = "com.dongting.player.TEXT_NEXT";
+    static final String ACTION_RESTART = "com.dongting.player.TEXT_RESTART";
     static final String ACTION_STOP = "com.dongting.player.TEXT_STOP";
 
     static final String EXTRA_TEXT_URI = "text_uri";
@@ -86,6 +87,10 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
             moveChunk(-1);
         } else if (ACTION_NEXT.equals(action)) {
             moveChunk(1);
+        } else if (ACTION_RESTART.equals(action)) {
+            currentChunk = 0;
+            if (!textUri.isEmpty()) prefs.edit().putInt("ttsChunk:" + textUri, 0).apply();
+            speakCurrent();
         } else if (ACTION_STOP.equals(action)) {
             stopReading();
         }
@@ -246,6 +251,7 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
                 .addAction(reading ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play,
                         reading ? "暂停" : "继续", action(ACTION_TOGGLE, 31))
                 .addAction(android.R.drawable.ic_media_next, "下一段", action(ACTION_NEXT, 34))
+                .addAction(android.R.drawable.ic_menu_revert, "从头读", action(ACTION_RESTART, 35))
                 .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止", action(ACTION_STOP, 32));
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) builder.setChannelId(CHANNEL_ID);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) builder.setVisibility(Notification.VISIBILITY_PUBLIC);
