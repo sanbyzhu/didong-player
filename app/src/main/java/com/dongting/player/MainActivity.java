@@ -60,6 +60,7 @@ import androidx.media3.common.PlaybackParameters;
 import androidx.media3.common.Player;
 import androidx.media3.exoplayer.ExoPlayer;
 import androidx.media3.session.MediaSession;
+import androidx.media3.ui.AspectRatioFrameLayout;
 import androidx.media3.ui.PlayerView;
 
 import org.json.JSONArray;
@@ -324,6 +325,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                             .putString("currentUri", entry.uri)
                             .putString("selectedPlaylist", selectedPlaylist)
                             .putInt("currentIndex", currentIndex)
+                            .putString(playlistMemoryUriKey(selectedPlaylist), entry.uri)
+                            .putInt(playlistMemoryIndexKey(selectedPlaylist), currentIndex)
                             .apply();
                     refreshMediaList();
                 }
@@ -360,6 +363,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         playerView.setPlayer(player);
         playerView.setUseController(false);
         playerView.setBackgroundColor(0xFF050708);
+        applyVideoResizeMode();
         setupVideoGestures();
         playerView.setOnClickListener(v -> {
             if (currentEntry() != null && "video".equals(currentEntry().type)) toggleFullScreenVideo();
@@ -423,7 +427,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 btn("快退15秒", v -> seekBy(-15000)),
                 btn("快进30秒", v -> seekBy(30000)),
                 btn("播放页", v -> showNowPlayingPage()),
-                btn("睡眠定时", v -> showSleepTimerDialog())
+                btn("视频全屏", v -> enterVideoFullScreen())
         ));
 
         rootLayout.addView(row(
@@ -444,12 +448,14 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         rootLayout.addView(playlistSpinner, fullWrap());
         playlistSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                selectedPlaylist = String.valueOf(parent.getItemAtPosition(position));
+                String newPlaylist = String.valueOf(parent.getItemAtPosition(position));
+                if (newPlaylist.equals(selectedPlaylist) && !queue.isEmpty()) return;
+                saveCurrentPosition();
+                selectedPlaylist = newPlaylist;
                 prefs.edit().putString("selectedPlaylist", selectedPlaylist).apply();
                 List<MediaEntry> items = playlists.get(selectedPlaylist);
                 if (items != null) {
-                    currentIndex = -1;
-                    setQueue(items, false);
+                    restorePlaylistMemory(selectedPlaylist, items);
                     status("已切换列表：" + selectedPlaylist + "，" + items.size() + " 个文件");
                 }
             }
@@ -938,6 +944,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 .putString("currentUri", entry.uri)
                 .putString("selectedPlaylist", selectedPlaylist)
                 .putInt("currentIndex", currentIndex)
+                .putString(playlistMemoryUriKey(selectedPlaylist), entry.uri)
+                .putInt(playlistMemoryIndexKey(selectedPlaylist), currentIndex)
                 .apply();
         player.play();
         if (playbackService != null) playbackService.refreshNotification();
@@ -1089,6 +1097,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 btn("收藏", v -> addCurrentToFavorites()),
                 btn("随机", v -> playRandom()),
                 btn("清AB", v -> clearAb()),
+                btn("全屏", v -> enterVideoFullScreen()),
                 btn("回开头", v -> seekToStart())
         ));
 
@@ -1186,6 +1195,15 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         }
     }
 
+    private void enterVideoFullScreen() {
+        MediaEntry entry = currentEntry();
+        if (entry == null || !"video".equals(entry.type)) {
+            status("当前不是视频");
+            return;
+        }
+        if (!fullScreenVideo) toggleFullScreenVideo();
+    }
+
     private void adjustSystemVolume(int direction) {
         if (audioManager == null) return;
         audioManager.adjustStreamVolume(AudioManager.STREAM_MUSIC,
@@ -1210,6 +1228,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         ViewGroup.LayoutParams params = playerView.getLayoutParams();
         params.height = fullScreenVideo ? ViewGroup.LayoutParams.MATCH_PARENT : dp(210);
         playerView.setLayoutParams(params);
+        applyVideoResizeMode();
         rootLayout.setPadding(fullScreenVideo ? 0 : dp(10), fullScreenVideo ? 0 : dp(10), fullScreenVideo ? 0 : dp(10), fullScreenVideo ? 0 : dp(10));
         setRequestedOrientation(fullScreenVideo ? ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE : ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
         getWindow().getDecorView().setSystemUiVisibility(fullScreenVideo
@@ -1230,6 +1249,14 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         }
         if (playerView != null && !fullScreenVideo) playerView.setUseController(false);
+    }
+
+    private void applyVideoResizeMode() {
+        if (playerView == null) return;
+        boolean fill = prefs.getBoolean("videoFillScreen", true);
+        playerView.setResizeMode(fullScreenVideo && fill
+                ? AspectRatioFrameLayout.RESIZE_MODE_ZOOM
+                : AspectRatioFrameLayout.RESIZE_MODE_FIT);
     }
 
     @Override
@@ -1874,11 +1901,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private void switchToPlaylist(String name) {
         if (!playlists.containsKey(name)) playlists.put(name, new ArrayList<>());
+        saveCurrentPosition();
         selectedPlaylist = name;
         refreshPlaylistSpinner();
         List<MediaEntry> items = playlists.get(name);
-        currentIndex = -1;
-        setQueue(items == null ? new ArrayList<>() : items, false);
+        restorePlaylistMemory(name, items == null ? new ArrayList<>() : items);
         status("已切换列表：" + name);
     }
 
@@ -1886,6 +1913,46 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         searchQuery = "";
         if (searchBox != null) searchBox.setText("");
         refreshMediaList();
+    }
+
+    private void restorePlaylistMemory(String playlistName, List<MediaEntry> items) {
+        if (items == null) items = new ArrayList<>();
+        if (items.isEmpty()) {
+            currentIndex = -1;
+            setQueue(items, false);
+            nowPlaying.setText("洞听播放器");
+            return;
+        }
+
+        String savedUri = prefs.getString(playlistMemoryUriKey(playlistName), "");
+        int restoredIndex = indexOfUri(items, savedUri);
+        if (restoredIndex < 0) {
+            restoredIndex = Math.max(0, Math.min(prefs.getInt(playlistMemoryIndexKey(playlistName), 0), items.size() - 1));
+        }
+
+        currentIndex = restoredIndex;
+        MediaEntry entry = items.get(currentIndex);
+        nowPlaying.setText(entry.title + "\n" + entry.folderName);
+        setQueue(items, false);
+        long last = prefs.getLong("pos:" + entry.uri, 0);
+        if (player != null) {
+            player.seekTo(currentIndex, Math.max(0, last));
+        }
+        float folderSpeed = prefs.getFloat(speedKey(entry), prefs.getFloat("lastSpeed", 1f));
+        if (speedBar != null) speedBar.setProgress(Math.round((folderSpeed - 0.25f) * 100f));
+        setSpeed(folderSpeed, false);
+        loadAb(entry.uri);
+        refreshMediaList();
+        updatePositionUi();
+        updatePlayPauseButton();
+    }
+
+    private String playlistMemoryUriKey(String playlistName) {
+        return "playlistUri:" + playlistName;
+    }
+
+    private String playlistMemoryIndexKey(String playlistName) {
+        return "playlistIndex:" + playlistName;
     }
 
     private void loadPlaylists() {
@@ -2376,6 +2443,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     .putString("currentUri", entry.uri)
                     .putString("selectedPlaylist", selectedPlaylist)
                     .putInt("currentIndex", currentIndex)
+                    .putString(playlistMemoryUriKey(selectedPlaylist), entry.uri)
+                    .putInt(playlistMemoryIndexKey(selectedPlaylist), currentIndex)
                     .apply();
         }
     }

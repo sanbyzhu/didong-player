@@ -88,7 +88,8 @@ public class SettingsActivity extends AppCompatActivity {
         addSection(root, "视频设置",
                 check("视频播放时保持屏幕常亮", "videoKeepScreenOn", true),
                 check("视频全屏时显示系统控制条", "videoFullscreenControls", true),
-                label("视频播放时会自动保持屏幕常亮；全屏时显示系统播放控制条。", 14, COLOR_SUBTLE));
+                check("视频全屏时填充画面", "videoFillScreen", true),
+                label("填充画面会尽量铺满屏幕，可能裁掉少量边缘；关闭后完整显示原比例。", 14, COLOR_SUBTLE));
 
         addSection(root, "数据管理",
                 btn("清空最近播放", v -> {
@@ -175,6 +176,7 @@ public class SettingsActivity extends AppCompatActivity {
                             .putInt("bgVolume", 25)
                             .putBoolean("videoKeepScreenOn", true)
                             .putBoolean("videoFullscreenControls", true)
+                            .putBoolean("videoFillScreen", true)
                             .putFloat("lastSpeed", 1f)
                             .remove("ttsVoice")
                             .remove("sleepAt")
