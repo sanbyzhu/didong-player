@@ -65,6 +65,7 @@ public class SettingsActivity extends AppCompatActivity {
                 slider("无损增益", "boost", 3000, 0),
                 slider("低音增强", "bass", 1000, 0),
                 slider("立体感增强", "stereo", 1000, 0),
+                label("主界面高级控制中还提供五段均衡器，部分手机或蓝牙设备可能限制系统音效。", 13, COLOR_SUBTLE),
                 btn("恢复音效默认", v -> {
                     prefs.edit().putInt("boost", 0).putInt("bass", 0).putInt("stereo", 0).putInt("volume", 100).apply();
                     toast("音效已恢复默认");
@@ -89,7 +90,7 @@ public class SettingsActivity extends AppCompatActivity {
                 check("视频播放时保持屏幕常亮", "videoKeepScreenOn", true),
                 check("视频全屏播放时自动隐藏控制台", "videoFullscreenControls", true),
                 check("视频全屏时填充画面", "videoFillScreen", false),
-                label("默认完整显示原比例，适合手机竖屏视频；开启填充画面会铺满屏幕但可能裁掉边缘。", 14, COLOR_SUBTLE));
+                label("默认完整显示原比例，适合手机竖屏视频；开启填充画面会铺满屏幕但可能裁掉边缘。视频控制台支持导入 SRT 字幕和旋转画面。", 14, COLOR_SUBTLE));
 
         addSection(root, "数据管理",
                 btn("清空最近播放", v -> {
@@ -101,6 +102,12 @@ public class SettingsActivity extends AppCompatActivity {
                 btn("清除所有 AB 循环", v -> confirmClearPrefix("ab:", "AB 循环")),
                 btn("清除所有书签", v -> confirmClearPrefix("bookmarks:", "书签")),
                 label("清空列表只会删除 App 内记录，不会删除手机里的音频/视频文件。", 13, COLOR_SUBTLE));
+
+        addSection(root, "开发说明",
+                label("洞听播放器由朱振坚个人利用 AI 在业余时间开发，仅供个人学习研究使用，莫要用于商业销售。", 14, COLOR_TEXT),
+                label("首发在公众号：小二菜园", 14, COLOR_SUBTLE),
+                label("微信和 QQ：254850837", 14, COLOR_SUBTLE),
+                label("祝大家学习愉快！", 14, COLOR_ACCENT));
 
         root.addView(btn("返回播放器", v -> finish()), fullParams());
         return scroll;

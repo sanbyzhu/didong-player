@@ -138,6 +138,12 @@ public class PlaybackService extends Service {
                         player.isPlaying() ? "暂停" : "播放", action(ACTION_TOGGLE, 2))
                 .addAction(android.R.drawable.ic_media_next, "下一首", action(ACTION_NEXT, 3))
                 .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止", action(ACTION_STOP, 4));
+        long duration = player.getDuration();
+        long position = player.getCurrentPosition();
+        if (duration > 0 && duration != C.TIME_UNSET) {
+            builder.setProgress(1000, (int) Math.max(0, Math.min(1000, position * 1000L / duration)), false)
+                    .setSubText(formatMs(position) + " / " + formatMs(duration));
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             builder.setChannelId(CHANNEL_ID);
         }
@@ -163,6 +169,16 @@ public class PlaybackService extends Service {
         channel.setDescription("洞听播放器后台播放控制");
         NotificationManager manager = getSystemService(NotificationManager.class);
         if (manager != null) manager.createNotificationChannel(channel);
+    }
+
+    private String formatMs(long ms) {
+        if (ms < 0 || ms == C.TIME_UNSET) return "00:00";
+        long total = ms / 1000;
+        long seconds = total % 60;
+        long minutes = (total / 60) % 60;
+        long hours = total / 3600;
+        if (hours > 0) return String.format(java.util.Locale.CHINA, "%d:%02d:%02d", hours, minutes, seconds);
+        return String.format(java.util.Locale.CHINA, "%02d:%02d", minutes, seconds);
     }
 
     public class LocalBinder extends Binder {
