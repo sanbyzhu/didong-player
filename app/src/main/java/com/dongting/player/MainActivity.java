@@ -9,6 +9,7 @@ import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
+import android.database.Cursor;
 import android.media.audiofx.LoudnessEnhancer;
 import android.media.audiofx.BassBoost;
 import android.media.audiofx.Virtualizer;
@@ -19,6 +20,7 @@ import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
 import android.provider.Settings;
+import android.provider.OpenableColumns;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 import android.speech.tts.Voice;
@@ -48,6 +50,7 @@ import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
 import androidx.media3.common.MediaMetadata;
+import androidx.media3.common.PlaybackException;
 import androidx.media3.common.PlaybackParameters;
 import androidx.media3.common.Player;
 import androidx.media3.exoplayer.ExoPlayer;
@@ -77,6 +80,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private static final String PREFS = "dongting_player";
     private static final String PLAYLIST_DEFAULT = "默认列表";
     private static final String PLAYLIST_ALL = "全部文件";
+    private static final String PLAYLIST_OPENED = "打开的文件";
     private static final String PLAYLIST_FAVORITES = "收藏";
     private static final String PLAYLIST_RECENT = "最近播放";
     private static final int COLOR_BG = 0xFF101418;
@@ -154,6 +158,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             playerView.setPlayer(player);
             attachPlayerListener();
             restoreLastSession();
+            processExternalIntent(getIntent());
             updatePlayPauseButton();
             updatePositionUi();
         }
@@ -176,6 +181,17 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                                 result.getData().getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION));
                         scanFolder(uri);
                     }
+                }
+            });
+
+    private final ActivityResultLauncher<Intent> mediaPicker =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+                if (result.getResultCode() == RESULT_OK && result.getData() != null && result.getData().getData() != null) {
+                    Uri uri = result.getData().getData();
+                    getContentResolver().takePersistableUriPermission(
+                            uri,
+                            result.getData().getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION));
+                    openMediaUri(uri);
                 }
             });
 
@@ -207,6 +223,13 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         requestNotificationPermission();
         loadPlaylists();
         tts = new TextToSpeech(this, this);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        setIntent(intent);
+        processExternalIntent(intent);
     }
 
     private void requestNotificationPermission() {
@@ -266,6 +289,14 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 }
                 updatePositionUi();
             }
+
+            @Override
+            public void onPlayerError(PlaybackException error) {
+                status("播放失败：" + error.getErrorCodeName());
+                if (queue.size() > 1) {
+                    playRelative(1);
+                }
+            }
         });
     }
 
@@ -319,9 +350,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
         rootLayout.addView(row(
                 btn("扫描文件夹", v -> pickFolder()),
+                btn("打开文件", v -> pickMediaFile()),
                 btn("新建列表", v -> createPlaylist()),
-                btn("列表管理", v -> showPlaylistManager()),
-                btn("投屏", v -> status("二期功能：将接入 MediaRouter/Cast/DLNA，支持仅投画面或音画同投。"))
+                btn("列表管理", v -> showPlaylistManager())
         ));
 
         LinearLayout playbackRow = row(
@@ -544,6 +575,67 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         folderPicker.launch(intent);
+    }
+
+    private void pickMediaFile() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        intent.addCategory(Intent.CATEGORY_OPENABLE);
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"audio/*", "video/*"});
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        mediaPicker.launch(intent);
+    }
+
+    private void processExternalIntent(Intent intent) {
+        if (intent == null || player == null) return;
+        String action = intent.getAction();
+        Uri uri = intent.getData();
+        if (Intent.ACTION_VIEW.equals(action) && uri != null) {
+            openMediaUri(uri);
+            intent.setAction(null);
+            intent.setData(null);
+        }
+    }
+
+    private void openMediaUri(Uri uri) {
+        String title = displayName(uri);
+        MediaEntry entry = new MediaEntry(
+                uri.toString(),
+                title,
+                PLAYLIST_OPENED,
+                "opened",
+                isVideo(title) ? "video" : "audio"
+        );
+        ensureSmartPlaylists();
+        List<MediaEntry> opened = playlists.computeIfAbsent(PLAYLIST_OPENED, key -> new ArrayList<>());
+        removeUri(opened, entry.uri);
+        opened.add(0, entry);
+        while (opened.size() > 100) opened.remove(opened.size() - 1);
+        savePlaylists();
+        selectedPlaylist = PLAYLIST_OPENED;
+        refreshPlaylistSpinner();
+        setQueue(opened, false);
+        playAt(0);
+        status("已打开文件：" + title);
+    }
+
+    private String displayName(Uri uri) {
+        if (ContentResolver.SCHEME_CONTENT.equals(uri.getScheme())) {
+            try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+                if (cursor != null && cursor.moveToFirst()) {
+                    int index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                    if (index >= 0) {
+                        String name = cursor.getString(index);
+                        if (name != null && !name.trim().isEmpty()) return name;
+                    }
+                }
+            } catch (RuntimeException ignored) {
+            }
+        }
+        String path = uri.getLastPathSegment();
+        if (path == null || path.trim().isEmpty()) return "打开的文件";
+        int slash = path.lastIndexOf('/');
+        return slash >= 0 ? path.substring(slash + 1) : path;
     }
 
     private void scanFolder(Uri folderUri) {
@@ -1237,6 +1329,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private boolean canEditPlaylist(String name) {
         return !PLAYLIST_DEFAULT.equals(name)
                 && !PLAYLIST_ALL.equals(name)
+                && !PLAYLIST_OPENED.equals(name)
                 && !PLAYLIST_FAVORITES.equals(name)
                 && !PLAYLIST_RECENT.equals(name)
                 && !name.startsWith("文件夹：");
@@ -1398,6 +1491,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private void ensureSmartPlaylists() {
         playlists.computeIfAbsent(PLAYLIST_DEFAULT, key -> new ArrayList<>());
+        playlists.computeIfAbsent(PLAYLIST_OPENED, key -> new ArrayList<>());
         playlists.computeIfAbsent(PLAYLIST_FAVORITES, key -> new ArrayList<>());
         playlists.computeIfAbsent(PLAYLIST_RECENT, key -> new ArrayList<>());
     }
