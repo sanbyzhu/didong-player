@@ -86,6 +86,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private static final String PLAYLIST_OPENED = "打开的文件";
     private static final String PLAYLIST_FAVORITES = "收藏";
     private static final String PLAYLIST_RECENT = "最近播放";
+    private static final int MODE_SEQUENCE = 0;
+    private static final int MODE_REPEAT_ONE = 1;
+    private static final int MODE_REPEAT_LIST = 2;
+    private static final int MODE_SHUFFLE = 3;
     private static final int COLOR_BG = 0xFF101418;
     private static final int COLOR_PANEL = 0xFF1A2027;
     private static final int COLOR_TEXT = 0xFFF3F6F8;
@@ -311,6 +315,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     MediaEntry entry = queue.get(currentIndex);
                     nowPlaying.setText(entry.title + "\n" + entry.folderName);
                     loadAb(entry.uri);
+                    if (prefs.getBoolean("stopAfterCurrent", false) && reason == Player.MEDIA_ITEM_TRANSITION_REASON_AUTO) {
+                        prefs.edit().putBoolean("stopAfterCurrent", false).apply();
+                        player.pause();
+                        status("已播完当前文件并停止");
+                    }
                     prefs.edit()
                             .putString("currentUri", entry.uri)
                             .putString("selectedPlaylist", selectedPlaylist)
@@ -628,6 +637,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         updateLoopLabel();
         updatePlayPauseButton();
         updatePositionUi();
+        applyPlaybackMode();
     }
 
     private void toggleAdvancedPanel() {
@@ -846,6 +856,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         player.setMediaItems(items, safeIndex, position);
         player.prepare();
         player.setVolume(volumeBar == null ? 1f : volumeBar.getProgress() / 100f);
+        applyPlaybackMode();
     }
 
     private void refreshMediaList() {
@@ -921,6 +932,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         speedBar.setProgress(Math.round((folderSpeed - 0.25f) * 100f));
         setSpeed(folderSpeed, false);
         loadAb(entry.uri);
+        applyPlaybackMode();
         updateRecentPlaylist(entry);
         prefs.edit()
                 .putString("currentUri", entry.uri)
@@ -986,6 +998,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private void playRandom() {
         if (queue.isEmpty()) return;
+        loopMode = MODE_SHUFFLE;
+        prefs.edit().putInt("loopMode", loopMode).apply();
+        applyPlaybackMode();
+        updateLoopLabel();
         if (queue.size() == 1) {
             playAt(0);
             return;
@@ -1275,11 +1291,6 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             player.pause();
             updatePlayPauseButton();
             status("已播完当前列表并停止");
-        } else if (loopMode == 1) {
-            player.seekTo(0);
-            player.play();
-        } else if (loopMode == 2 && !queue.isEmpty()) {
-            playRelative(1);
         } else {
             updatePlayPauseButton();
         }
@@ -1331,15 +1342,38 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void cycleLoop() {
-        loopMode = (loopMode + 1) % 3;
+        loopMode = (loopMode + 1) % 4;
         prefs.edit().putInt("loopMode", loopMode).apply();
+        applyPlaybackMode();
         updateLoopLabel();
+        status(playbackModeName());
     }
 
     private void updateLoopLabel() {
-        String text = loopMode == 0 ? "循环：关闭" : loopMode == 1 ? "循环：单曲" : "循环：列表";
+        String text = "播放模式：" + playbackModeName();
+        if (prefs.getBoolean("stopAfterCurrent", false)) text += " | 播完当前停止";
+        if (prefs.getBoolean("stopAfterList", false)) text += " | 播完列表停止";
         String ab = abEnabled && abA != C.TIME_UNSET && abB != C.TIME_UNSET ? " | AB：" + formatMs(abA) + "-" + formatMs(abB) : "";
         loopLabel.setText(text + ab);
+    }
+
+    private String playbackModeName() {
+        if (loopMode == MODE_REPEAT_ONE) return "单曲循环";
+        if (loopMode == MODE_REPEAT_LIST) return "列表循环";
+        if (loopMode == MODE_SHUFFLE) return "随机循环";
+        return "顺序播放";
+    }
+
+    private void applyPlaybackMode() {
+        if (player == null) return;
+        player.setShuffleModeEnabled(loopMode == MODE_SHUFFLE);
+        if (loopMode == MODE_REPEAT_ONE) {
+            player.setRepeatMode(Player.REPEAT_MODE_ONE);
+        } else if (loopMode == MODE_REPEAT_LIST || loopMode == MODE_SHUFFLE) {
+            player.setRepeatMode(Player.REPEAT_MODE_ALL);
+        } else {
+            player.setRepeatMode(Player.REPEAT_MODE_OFF);
+        }
     }
 
     private void setA() {
@@ -1902,6 +1936,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         }
         if (items == null || items.isEmpty()) return;
 
+        applyPlaybackMode();
         setQueue(items, false);
         String currentUri = prefs.getString("currentUri", "");
         int restoredIndex = -1;
@@ -1924,6 +1959,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         speedBar.setProgress(Math.round((folderSpeed - 0.25f) * 100f));
         setSpeed(folderSpeed, false);
         loadAb(entry.uri);
+        applyPlaybackMode();
         refreshMediaList();
         updatePositionUi();
         updatePlayPauseButton();
