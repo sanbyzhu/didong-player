@@ -8,6 +8,7 @@ import android.content.ContentResolver;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.SharedPreferences;
+import android.content.pm.ActivityInfo;
 import android.media.audiofx.LoudnessEnhancer;
 import android.media.audiofx.BassBoost;
 import android.media.audiofx.Virtualizer;
@@ -88,6 +89,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private final List<MediaEntry> library = new ArrayList<>();
     private final List<MediaEntry> queue = new ArrayList<>();
     private final List<Integer> visibleQueueIndexes = new ArrayList<>();
+    private final List<View> fullscreenHiddenViews = new ArrayList<>();
     private final Map<String, List<MediaEntry>> playlists = new HashMap<>();
     private final Collator collator = Collator.getInstance(Locale.CHINA);
     private final Random random = new Random();
@@ -102,6 +104,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private Virtualizer virtualizer;
     private TextToSpeech tts;
 
+    private LinearLayout rootLayout;
     private PlayerView playerView;
     private ListView mediaList;
     private ArrayAdapter<String> mediaAdapter;
@@ -128,6 +131,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private long abB = C.TIME_UNSET;
     private boolean abEnabled = false;
     private boolean draggingPosition = false;
+    private boolean fullScreenVideo = false;
     private boolean suppressPositionSave = false;
     private String selectedPlaylist = PLAYLIST_DEFAULT;
     private String searchQuery = "";
@@ -258,25 +262,28 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void setupUi() {
-        LinearLayout root = new LinearLayout(this);
-        root.setOrientation(LinearLayout.VERTICAL);
-        root.setBackgroundColor(COLOR_BG);
-        root.setPadding(dp(10), dp(10), dp(10), dp(10));
+        rootLayout = new LinearLayout(this);
+        rootLayout.setOrientation(LinearLayout.VERTICAL);
+        rootLayout.setBackgroundColor(COLOR_BG);
+        rootLayout.setPadding(dp(10), dp(10), dp(10), dp(10));
 
         nowPlaying = label("洞听播放器", 20, COLOR_TEXT);
         nowPlaying.setGravity(Gravity.CENTER_VERTICAL);
         nowPlaying.setOnClickListener(v -> togglePlay());
-        root.addView(nowPlaying);
+        rootLayout.addView(nowPlaying);
 
         playerView = new PlayerView(this);
         playerView.setPlayer(player);
         playerView.setUseController(false);
         playerView.setBackgroundColor(0xFF050708);
-        root.addView(playerView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(210)));
+        playerView.setOnClickListener(v -> {
+            if (currentEntry() != null && "video".equals(currentEntry().type)) toggleFullScreenVideo();
+        });
+        rootLayout.addView(playerView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(210)));
 
         positionLabel = label("00:00 / 00:00", 13, COLOR_SUBTLE);
         positionLabel.setGravity(Gravity.CENTER);
-        root.addView(positionLabel);
+        rootLayout.addView(positionLabel);
 
         positionBar = new SeekBar(this);
         positionBar.setMax(1000);
@@ -300,12 +307,12 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 updatePositionUi();
             }
         });
-        root.addView(positionBar);
+        rootLayout.addView(positionBar);
 
-        root.addView(row(
+        rootLayout.addView(row(
                 btn("扫描文件夹", v -> pickFolder()),
                 btn("新建列表", v -> createPlaylist()),
-                btn("加入列表", v -> addLibraryToPlaylist()),
+                btn("列表管理", v -> showPlaylistManager()),
                 btn("投屏", v -> status("二期功能：将接入 MediaRouter/Cast/DLNA，支持仅投画面或音画同投。"))
         ));
 
@@ -319,16 +326,16 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         playPauseButton.setTextSize(18);
         playPauseButton.setTextColor(0xFF101418);
         playPauseButton.setBackgroundColor(COLOR_ACCENT);
-        root.addView(playbackRow);
+        rootLayout.addView(playbackRow);
 
-        root.addView(row(
+        rootLayout.addView(row(
                 btn("快退15秒", v -> seekBy(-15000)),
                 btn("快进30秒", v -> seekBy(30000)),
                 btn("随机播放", v -> playRandom()),
                 btn("睡眠定时", v -> showSleepTimerDialog())
         ));
 
-        root.addView(row(
+        rootLayout.addView(row(
                 btn("收藏当前", v -> addCurrentToFavorites()),
                 btn("最近播放", v -> switchToPlaylist(PLAYLIST_RECENT)),
                 btn("移出列表", v -> removeCurrentFromPlaylist()),
@@ -336,13 +343,13 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         ));
 
         playlistSpinner = new Spinner(this);
-        root.addView(playlistSpinner, fullWrap());
+        rootLayout.addView(playlistSpinner, fullWrap());
         playlistSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
                 selectedPlaylist = String.valueOf(parent.getItemAtPosition(position));
                 prefs.edit().putString("selectedPlaylist", selectedPlaylist).apply();
                 List<MediaEntry> items = playlists.get(selectedPlaylist);
-                if (items != null && !items.isEmpty()) {
+                if (items != null) {
                     currentIndex = -1;
                     setQueue(items, false);
                     status("已切换列表：" + selectedPlaylist + "，" + items.size() + " 个文件");
@@ -366,7 +373,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             }
             @Override public void afterTextChanged(Editable s) { }
         });
-        root.addView(searchBox, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)));
+        rootLayout.addView(searchBox, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)));
 
         speedLabel = label("", 14, COLOR_SUBTLE);
         speedBar = new SeekBar(this);
@@ -376,8 +383,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             float speed = (progress + 25) / 100f;
             setSpeed(speed, true);
         }));
-        root.addView(speedLabel);
-        root.addView(speedBar);
+        rootLayout.addView(speedLabel);
+        rootLayout.addView(speedBar);
 
         volumeBar = new SeekBar(this);
         volumeBar.setMax(100);
@@ -386,8 +393,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             if (player != null) player.setVolume(progress / 100f);
             prefs.edit().putInt("volume", progress).apply();
         }));
-        root.addView(label("播放音量", 14, COLOR_SUBTLE));
-        root.addView(volumeBar);
+        rootLayout.addView(label("播放音量", 14, COLOR_SUBTLE));
+        rootLayout.addView(volumeBar);
 
         boostBar = new SeekBar(this);
         boostBar.setMax(1500);
@@ -396,8 +403,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             prefs.edit().putInt("boost", progress).apply();
             applyAudioEffects();
         }));
-        root.addView(label("无损增益（不改源文件）", 14, COLOR_SUBTLE));
-        root.addView(boostBar);
+        rootLayout.addView(label("无损增益（不改源文件）", 14, COLOR_SUBTLE));
+        rootLayout.addView(boostBar);
 
         bassBar = new SeekBar(this);
         bassBar.setMax(1000);
@@ -406,8 +413,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             prefs.edit().putInt("bass", progress).apply();
             applyAudioEffects();
         }));
-        root.addView(label("低音增强", 14, COLOR_SUBTLE));
-        root.addView(bassBar);
+        rootLayout.addView(label("低音增强", 14, COLOR_SUBTLE));
+        rootLayout.addView(bassBar);
 
         stereoBar = new SeekBar(this);
         stereoBar.setMax(1000);
@@ -416,26 +423,26 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             prefs.edit().putInt("stereo", progress).apply();
             applyAudioEffects();
         }));
-        root.addView(label("立体感增强", 14, COLOR_SUBTLE));
-        root.addView(stereoBar);
+        rootLayout.addView(label("立体感增强", 14, COLOR_SUBTLE));
+        rootLayout.addView(stereoBar);
 
         loopLabel = label("", 14, COLOR_SUBTLE);
-        root.addView(loopLabel);
-        root.addView(row(
+        rootLayout.addView(loopLabel);
+        rootLayout.addView(row(
                 btn("循环模式", v -> cycleLoop()),
                 btn("A点", v -> setA()),
                 btn("B点", v -> setB()),
                 btn("清AB", v -> clearAb())
         ));
 
-        root.addView(row(
+        rootLayout.addView(row(
                 btn("导入TXT", v -> pickText()),
                 btn("朗读/暂停", v -> speakText()),
                 btn("停止朗读", v -> stopSpeaking()),
                 btn("背景音乐", v -> pickBackground())
         ));
         voiceSpinner = new Spinner(this);
-        root.addView(voiceSpinner, fullWrap());
+        rootLayout.addView(voiceSpinner, fullWrap());
         bgVolumeBar = new SeekBar(this);
         bgVolumeBar.setMax(100);
         bgVolumeBar.setProgress(prefs.getInt("bgVolume", 25));
@@ -443,11 +450,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             bgPlayer.setVolume(progress / 100f);
             prefs.edit().putInt("bgVolume", progress).apply();
         }));
-        root.addView(label("朗读背景音量", 14, COLOR_SUBTLE));
-        root.addView(bgVolumeBar);
+        rootLayout.addView(label("朗读背景音量", 14, COLOR_SUBTLE));
+        rootLayout.addView(bgVolumeBar);
 
         status = label("请选择文件夹开始扫描", 14, COLOR_SUBTLE);
-        root.addView(status);
+        rootLayout.addView(status);
 
         mediaList = new ListView(this);
         mediaList.setBackgroundColor(COLOR_PANEL);
@@ -462,9 +469,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 playAt(queueIndex);
             }
         });
-        root.addView(mediaList, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+        rootLayout.addView(mediaList, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        setContentView(root);
+        setContentView(rootLayout);
         setSpeed((speedBar.getProgress() + 25) / 100f, false);
         bgPlayer.setVolume(bgVolumeBar.getProgress() / 100f);
         updateLoopLabel();
@@ -525,6 +532,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void setQueue(List<MediaEntry> source, boolean showLibrary) {
+        if (source == null) source = new ArrayList<>();
         List<MediaEntry> snapshot = new ArrayList<>(source);
         queue.clear();
         queue.addAll(snapshot);
@@ -666,6 +674,39 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             next = random.nextInt(queue.size());
         } while (next == currentIndex);
         playAt(next);
+    }
+
+    private void toggleFullScreenVideo() {
+        if (rootLayout == null || playerView == null) return;
+        fullScreenVideo = !fullScreenVideo;
+        fullscreenHiddenViews.clear();
+        for (int i = 0; i < rootLayout.getChildCount(); i++) {
+            View child = rootLayout.getChildAt(i);
+            if (child != playerView && fullScreenVideo) {
+                fullscreenHiddenViews.add(child);
+                child.setVisibility(View.GONE);
+            } else if (!fullScreenVideo) {
+                child.setVisibility(View.VISIBLE);
+            }
+        }
+        ViewGroup.LayoutParams params = playerView.getLayoutParams();
+        params.height = fullScreenVideo ? ViewGroup.LayoutParams.MATCH_PARENT : dp(210);
+        playerView.setLayoutParams(params);
+        rootLayout.setPadding(fullScreenVideo ? 0 : dp(10), fullScreenVideo ? 0 : dp(10), fullScreenVideo ? 0 : dp(10), fullScreenVideo ? 0 : dp(10));
+        setRequestedOrientation(fullScreenVideo ? ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE : ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+        getWindow().getDecorView().setSystemUiVisibility(fullScreenVideo
+                ? View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                : View.SYSTEM_UI_FLAG_VISIBLE);
+        status(fullScreenVideo ? "已进入视频全屏，点画面或返回退出" : "已退出全屏");
+    }
+
+    @Override
+    public void onBackPressed() {
+        if (fullScreenVideo) {
+            toggleFullScreenVideo();
+            return;
+        }
+        super.onBackPressed();
     }
 
     private void showSleepTimerDialog() {
@@ -859,6 +900,95 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 })
                 .setNegativeButton("取消", null)
                 .show();
+    }
+
+    private void showPlaylistManager() {
+        String[] options = {"把扫描结果加入当前列表", "重命名当前列表", "删除当前列表", "清空最近播放"};
+        new AlertDialog.Builder(this)
+                .setTitle("列表管理：" + selectedPlaylist)
+                .setItems(options, (dialog, which) -> {
+                    if (which == 0) {
+                        addLibraryToPlaylist();
+                    } else if (which == 1) {
+                        renameCurrentPlaylist();
+                    } else if (which == 2) {
+                        deleteCurrentPlaylist();
+                    } else {
+                        clearRecentPlaylist();
+                    }
+                })
+                .show();
+    }
+
+    private void renameCurrentPlaylist() {
+        if (!canEditPlaylist(selectedPlaylist)) {
+            status("内置或自动列表不能重命名");
+            return;
+        }
+        EditText input = new EditText(this);
+        input.setText(selectedPlaylist);
+        input.setSelection(input.getText().length());
+        new AlertDialog.Builder(this)
+                .setTitle("重命名列表")
+                .setView(input)
+                .setPositiveButton("保存", (dialog, which) -> {
+                    String newName = input.getText().toString().trim();
+                    if (newName.isEmpty()) {
+                        status("列表名不能为空");
+                        return;
+                    }
+                    if (playlists.containsKey(newName)) {
+                        status("列表名已存在");
+                        return;
+                    }
+                    List<MediaEntry> items = playlists.remove(selectedPlaylist);
+                    playlists.put(newName, items == null ? new ArrayList<>() : items);
+                    selectedPlaylist = newName;
+                    savePlaylists();
+                    refreshPlaylistSpinner();
+                    status("已重命名为：" + newName);
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void deleteCurrentPlaylist() {
+        if (!canEditPlaylist(selectedPlaylist)) {
+            status("内置或自动列表不能删除");
+            return;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("删除列表")
+                .setMessage("只删除 App 内列表，不删除源文件。确定删除“" + selectedPlaylist + "”？")
+                .setPositiveButton("删除", (dialog, which) -> {
+                    playlists.remove(selectedPlaylist);
+                    selectedPlaylist = PLAYLIST_DEFAULT;
+                    savePlaylists();
+                    refreshPlaylistSpinner();
+                    setQueue(playlists.get(PLAYLIST_DEFAULT), false);
+                    status("列表已删除");
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void clearRecentPlaylist() {
+        List<MediaEntry> recent = playlists.computeIfAbsent(PLAYLIST_RECENT, key -> new ArrayList<>());
+        recent.clear();
+        savePlaylists();
+        if (PLAYLIST_RECENT.equals(selectedPlaylist)) {
+            currentIndex = -1;
+            setQueue(recent, false);
+        }
+        status("已清空最近播放");
+    }
+
+    private boolean canEditPlaylist(String name) {
+        return !PLAYLIST_DEFAULT.equals(name)
+                && !PLAYLIST_ALL.equals(name)
+                && !PLAYLIST_FAVORITES.equals(name)
+                && !PLAYLIST_RECENT.equals(name)
+                && !name.startsWith("文件夹：");
     }
 
     private void addLibraryToPlaylist() {
