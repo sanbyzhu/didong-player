@@ -9,13 +9,17 @@ import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.CheckBox;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
+import android.widget.SeekBar;
 import android.widget.TextView;
 import android.widget.Toast;
 
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
+
+import java.util.Map;
 
 public class SettingsActivity extends AppCompatActivity {
     private static final String PREFS = "dongting_player";
@@ -58,6 +62,10 @@ public class SettingsActivity extends AppCompatActivity {
                 }));
 
         addSection(root, "音效设置",
+                slider("播放音量", "volume", 100, 100),
+                slider("无损增益", "boost", 1500, 0),
+                slider("低音增强", "bass", 1000, 0),
+                slider("立体感增强", "stereo", 1000, 0),
                 btn("恢复音效默认", v -> {
                     prefs.edit().putInt("boost", 0).putInt("bass", 0).putInt("stereo", 0).putInt("volume", 100).apply();
                     toast("音效已恢复默认");
@@ -65,6 +73,9 @@ public class SettingsActivity extends AppCompatActivity {
                 btn("打开系统声音设置", v -> openSoundSettings()));
 
         addSection(root, "朗读设置",
+                slider("朗读语速", "ttsRate", 150, 75),
+                slider("朗读音调", "ttsPitch", 100, 50),
+                slider("背景音乐音量", "bgVolume", 100, 25),
                 btn("恢复朗读默认", v -> {
                     prefs.edit().putInt("ttsRate", 75).putInt("ttsPitch", 50).putInt("bgVolume", 25).remove("ttsVoice").apply();
                     toast("朗读设置已恢复默认");
@@ -76,6 +87,8 @@ public class SettingsActivity extends AppCompatActivity {
                 btn("清除 TXT 记忆", v -> confirmClearTextMemory()));
 
         addSection(root, "视频设置",
+                check("视频播放时保持屏幕常亮", "videoKeepScreenOn", true),
+                check("视频全屏时显示系统控制条", "videoFullscreenControls", true),
                 label("视频播放时会自动保持屏幕常亮；全屏时显示系统播放控制条。", 14, COLOR_SUBTLE));
 
         addSection(root, "数据管理",
@@ -84,6 +97,9 @@ public class SettingsActivity extends AppCompatActivity {
                     toast("已清空最近播放");
                 }),
                 btn("清空收藏", v -> confirmClearPlaylist("收藏")),
+                btn("清除所有播放位置", v -> confirmClearPrefix("pos:", "播放位置")),
+                btn("清除所有 AB 循环", v -> confirmClearPrefix("ab:", "AB 循环")),
+                btn("清除所有书签", v -> confirmClearPrefix("bookmarks:", "书签")),
                 label("清空列表只会删除 App 内记录，不会删除手机里的音频/视频文件。", 13, COLOR_SUBTLE));
 
         root.addView(btn("返回播放器", v -> finish()), fullParams());
@@ -95,6 +111,42 @@ public class SettingsActivity extends AppCompatActivity {
         header.setPadding(0, dp(18), 0, dp(6));
         root.addView(header);
         for (View view : views) root.addView(view, fullParams());
+    }
+
+    private View slider(String title, String key, int max, int defaultValue) {
+        LinearLayout box = new LinearLayout(this);
+        box.setOrientation(LinearLayout.VERTICAL);
+        box.setPadding(0, dp(4), 0, dp(8));
+        TextView value = label(title + "：" + prefs.getInt(key, defaultValue), 14, COLOR_SUBTLE);
+        SeekBar bar = new SeekBar(this);
+        bar.setMax(max);
+        bar.setProgress(prefs.getInt(key, defaultValue));
+        bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
+            @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
+                value.setText(title + "：" + progress);
+                if (fromUser) prefs.edit().putInt(key, progress).apply();
+            }
+
+            @Override public void onStartTrackingTouch(SeekBar seekBar) {
+            }
+
+            @Override public void onStopTrackingTouch(SeekBar seekBar) {
+                prefs.edit().putInt(key, seekBar.getProgress()).apply();
+            }
+        });
+        box.addView(value);
+        box.addView(bar);
+        return box;
+    }
+
+    private View check(String text, String key, boolean defaultValue) {
+        CheckBox box = new CheckBox(this);
+        box.setText(text);
+        box.setTextColor(COLOR_TEXT);
+        box.setButtonTintList(android.content.res.ColorStateList.valueOf(COLOR_ACCENT));
+        box.setChecked(prefs.getBoolean(key, defaultValue));
+        box.setOnCheckedChangeListener((buttonView, isChecked) -> prefs.edit().putBoolean(key, isChecked).apply());
+        return box;
     }
 
     private void confirmClearTextMemory() {
@@ -119,6 +171,31 @@ public class SettingsActivity extends AppCompatActivity {
                 })
                 .setNegativeButton("取消", null)
                 .show();
+    }
+
+    private void confirmClearPrefix(String prefix, String label) {
+        new AlertDialog.Builder(this)
+                .setTitle("清除所有" + label)
+                .setMessage("只清除 App 内记忆，不会删除源文件。")
+                .setPositiveButton("清除", (dialog, which) -> {
+                    int count = clearKeysWithPrefix(prefix);
+                    toast("已清除 " + count + " 条" + label + "记录");
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private int clearKeysWithPrefix(String prefix) {
+        SharedPreferences.Editor editor = prefs.edit();
+        int count = 0;
+        for (Map.Entry<String, ?> entry : prefs.getAll().entrySet()) {
+            if (entry.getKey().startsWith(prefix)) {
+                editor.remove(entry.getKey());
+                count++;
+            }
+        }
+        editor.apply();
+        return count;
     }
 
     private void clearPlaylist(String name) {

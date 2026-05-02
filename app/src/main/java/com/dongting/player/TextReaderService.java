@@ -7,9 +7,11 @@ import android.app.PendingIntent;
 import android.app.Service;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
 import android.os.IBinder;
+import android.provider.OpenableColumns;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 import android.speech.tts.Voice;
@@ -30,6 +32,8 @@ import java.util.Set;
 public class TextReaderService extends Service implements TextToSpeech.OnInitListener {
     static final String ACTION_START = "com.dongting.player.TEXT_START";
     static final String ACTION_TOGGLE = "com.dongting.player.TEXT_TOGGLE";
+    static final String ACTION_PREVIOUS = "com.dongting.player.TEXT_PREVIOUS";
+    static final String ACTION_NEXT = "com.dongting.player.TEXT_NEXT";
     static final String ACTION_STOP = "com.dongting.player.TEXT_STOP";
 
     static final String EXTRA_TEXT_URI = "text_uri";
@@ -78,6 +82,10 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
             }
         } else if (ACTION_TOGGLE.equals(action)) {
             toggle();
+        } else if (ACTION_PREVIOUS.equals(action)) {
+            moveChunk(-1);
+        } else if (ACTION_NEXT.equals(action)) {
+            moveChunk(1);
         } else if (ACTION_STOP.equals(action)) {
             stopReading();
         }
@@ -157,6 +165,14 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
         }
     }
 
+    private void moveChunk(int delta) {
+        if (chunks.isEmpty()) return;
+        currentChunk = Math.max(0, Math.min(chunks.size() - 1, currentChunk + delta));
+        if (!textUri.isEmpty()) prefs.edit().putInt("ttsChunk:" + textUri, currentChunk).apply();
+        paused = false;
+        speakCurrent();
+    }
+
     private void pauseReading() {
         paused = true;
         if (tts != null) tts.stop();
@@ -226,8 +242,10 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
                 .setOngoing(reading)
                 .setShowWhen(false)
                 .setOnlyAlertOnce(true)
+                .addAction(android.R.drawable.ic_media_previous, "上一段", action(ACTION_PREVIOUS, 33))
                 .addAction(reading ? android.R.drawable.ic_media_pause : android.R.drawable.ic_media_play,
                         reading ? "暂停" : "继续", action(ACTION_TOGGLE, 31))
+                .addAction(android.R.drawable.ic_media_next, "下一段", action(ACTION_NEXT, 34))
                 .addAction(android.R.drawable.ic_menu_close_clear_cancel, "停止", action(ACTION_STOP, 32));
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) builder.setChannelId(CHANNEL_ID);
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) builder.setVisibility(Notification.VISIBILITY_PUBLIC);
@@ -264,6 +282,16 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
     }
 
     private String readDisplayName(Uri uri) {
+        try (Cursor cursor = getContentResolver().query(uri, null, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (index >= 0) {
+                    String name = cursor.getString(index);
+                    if (name != null && !name.isEmpty()) return name;
+                }
+            }
+        } catch (Exception ignored) {
+        }
         String name = uri.getLastPathSegment();
         return name == null || name.isEmpty() ? "TXT 朗读" : name;
     }

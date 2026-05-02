@@ -1074,14 +1074,15 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         getWindow().getDecorView().setSystemUiVisibility(fullScreenVideo
                 ? View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                 : View.SYSTEM_UI_FLAG_VISIBLE);
-        playerView.setUseController(fullScreenVideo);
+        playerView.setUseController(fullScreenVideo && prefs.getBoolean("videoFullscreenControls", true));
         updateVideoKeepScreenOn();
         status(fullScreenVideo ? "已进入视频全屏，点画面或返回退出" : "已退出全屏");
     }
 
     private void updateVideoKeepScreenOn() {
         MediaEntry entry = currentEntry();
-        boolean keepOn = player != null && player.isPlaying() && entry != null && "video".equals(entry.type);
+        boolean keepOn = prefs.getBoolean("videoKeepScreenOn", true)
+                && player != null && player.isPlaying() && entry != null && "video".equals(entry.type);
         if (keepOn || fullScreenVideo) {
             getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         } else {
