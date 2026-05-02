@@ -21,11 +21,11 @@ import androidx.appcompat.app.AppCompatActivity;
 
 public class SettingsActivity extends AppCompatActivity {
     private static final String PREFS = "dongting_player";
-    private static final int COLOR_BG = 0xFF101418;
-    private static final int COLOR_PANEL = 0xFF1A2027;
-    private static final int COLOR_TEXT = 0xFFF3F6F8;
-    private static final int COLOR_SUBTLE = 0xFFAAB4BF;
-    private static final int COLOR_ACCENT = 0xFF35C2A6;
+    private static final int COLOR_BG = 0xFF160E09;
+    private static final int COLOR_PANEL = 0xFF26170E;
+    private static final int COLOR_TEXT = 0xFFFFF4E2;
+    private static final int COLOR_SUBTLE = 0xFFD7B98E;
+    private static final int COLOR_ACCENT = 0xFFFFB451;
 
     private SharedPreferences prefs;
 
@@ -62,7 +62,7 @@ public class SettingsActivity extends AppCompatActivity {
 
         addSection(root, "音效设置",
                 slider("播放音量", "volume", 100, 100),
-                slider("无损增益", "boost", 1500, 0),
+                slider("无损增益", "boost", 3000, 0),
                 slider("低音增强", "bass", 1000, 0),
                 slider("立体感增强", "stereo", 1000, 0),
                 btn("恢复音效默认", v -> {
@@ -87,7 +87,7 @@ public class SettingsActivity extends AppCompatActivity {
 
         addSection(root, "视频设置",
                 check("视频播放时保持屏幕常亮", "videoKeepScreenOn", true),
-                check("视频全屏时显示系统控制条", "videoFullscreenControls", true),
+                check("视频全屏播放时自动隐藏控制台", "videoFullscreenControls", true),
                 check("视频全屏时填充画面", "videoFillScreen", false),
                 label("默认完整显示原比例，适合手机竖屏视频；开启填充画面会铺满屏幕但可能裁掉边缘。", 14, COLOR_SUBTLE));
 

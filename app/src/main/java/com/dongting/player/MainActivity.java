@@ -25,6 +25,12 @@ import android.provider.OpenableColumns;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
 import android.speech.tts.Voice;
+import android.graphics.Canvas;
+import android.graphics.LinearGradient;
+import android.graphics.Paint;
+import android.graphics.Path;
+import android.graphics.RectF;
+import android.graphics.Shader;
 import android.graphics.Typeface;
 import android.text.Editable;
 import android.text.TextWatcher;
@@ -91,11 +97,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private static final int MODE_REPEAT_ONE = 1;
     private static final int MODE_REPEAT_LIST = 2;
     private static final int MODE_SHUFFLE = 3;
-    private static final int COLOR_BG = 0xFF101418;
-    private static final int COLOR_PANEL = 0xFF1A2027;
-    private static final int COLOR_TEXT = 0xFFF3F6F8;
-    private static final int COLOR_SUBTLE = 0xFFAAB4BF;
-    private static final int COLOR_ACCENT = 0xFF35C2A6;
+    private static final int COLOR_BG = 0xFF160E09;
+    private static final int COLOR_PANEL = 0xFF26170E;
+    private static final int COLOR_TEXT = 0xFFFFF4E2;
+    private static final int COLOR_SUBTLE = 0xFFD7B98E;
+    private static final int COLOR_ACCENT = 0xFFFFB451;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
     private final List<MediaEntry> library = new ArrayList<>();
@@ -121,6 +127,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private LinearLayout rootLayout;
     private LinearLayout advancedPanel;
     private LinearLayout videoControlBar;
+    private DongtingVisualView visualView;
     private PlayerView playerView;
     private ListView mediaList;
     private ArrayAdapter<String> mediaAdapter;
@@ -133,6 +140,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private TextView speedLabel;
     private TextView loopLabel;
     private TextView listSummary;
+    private TextView audioEffectStatus;
     private Button advancedToggleButton;
     private Button playPauseButton;
     private Button mediaFilterButton;
@@ -230,8 +238,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     importedText = readText(uri);
                     importedTextKey = uri.toString();
                     currentTextChunk = prefs.getInt("ttsChunk:" + importedTextKey, 0);
+                    textChunks.clear();
                     prefs.edit().putString("lastTextUri", importedTextKey).apply();
                     status("已导入文本：" + importedText.length() + " 字，进度已恢复到第 " + (currentTextChunk + 1) + " 段");
+                    updateVisualStage();
                 }
             });
 
@@ -308,6 +318,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             @Override
             public void onIsPlayingChanged(boolean isPlaying) {
                 updatePlayPauseButton();
+                updateVideoControlVisibility();
                 refreshMediaList();
                 if (playbackService != null) playbackService.refreshNotification();
             }
@@ -336,6 +347,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     refreshMediaList();
                 }
                 updateVideoKeepScreenOn();
+                updateVideoControlVisibility();
+                updateVisualStage();
                 updatePositionUi();
             }
 
@@ -364,12 +377,16 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         });
         rootLayout.addView(nowPlaying);
 
+        visualView = new DongtingVisualView(this);
+        visualView.setOnClickListener(v -> showNowPlayingPage());
+        rootLayout.addView(visualView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(210)));
+
         playerView = new PlayerView(this);
         playerView.setPlayer(player);
         playerView.setUseController(false);
         playerView.setControllerAutoShow(false);
         playerView.setControllerShowTimeoutMs(3000);
-        playerView.setBackgroundColor(0xFF050708);
+        playerView.setBackgroundColor(0xFF0B0705);
         applyVideoResizeMode();
         setupVideoGestures();
         playerView.setOnTouchListener((view, event) -> {
@@ -379,13 +396,21 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             return true;
         });
         rootLayout.addView(playerView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(210)));
+        playerView.setVisibility(View.GONE);
         videoControlBar = buildVideoControlBar();
         videoControlBar.setVisibility(View.GONE);
         rootLayout.addView(videoControlBar, fullWrap());
 
+        ScrollView controlScroll = new ScrollView(this);
+        controlScroll.setFillViewport(false);
+        LinearLayout controls = new LinearLayout(this);
+        controls.setOrientation(LinearLayout.VERTICAL);
+        controlScroll.addView(controls, fullWrap());
+        rootLayout.addView(controlScroll, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.2f));
+
         positionLabel = label("00:00 / 00:00", 13, COLOR_SUBTLE);
         positionLabel.setGravity(Gravity.CENTER);
-        rootLayout.addView(positionLabel);
+        controls.addView(positionLabel);
 
         positionBar = new SeekBar(this);
         positionBar.setMax(1000);
@@ -409,9 +434,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 updatePositionUi();
             }
         });
-        rootLayout.addView(positionBar);
+        controls.addView(positionBar);
 
-        rootLayout.addView(row(
+        controls.addView(row(
                 btn("扫描文件夹", v -> pickFolder()),
                 btn("打开文件", v -> pickMediaFile()),
                 btn("新建列表", v -> createPlaylist()),
@@ -426,25 +451,25 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         );
         playPauseButton = (Button) playbackRow.getChildAt(1);
         playPauseButton.setTextSize(18);
-        playPauseButton.setTextColor(0xFF101418);
+        playPauseButton.setTextColor(0xFF160E09);
         playPauseButton.setBackgroundColor(COLOR_ACCENT);
-        rootLayout.addView(playbackRow);
+        controls.addView(playbackRow);
 
-        rootLayout.addView(row(
+        controls.addView(row(
                 btn("快退15秒", v -> seekBy(-15000)),
                 btn("快进30秒", v -> seekBy(30000)),
                 btn("播放页", v -> showNowPlayingPage()),
-                btn("视频全屏", v -> enterVideoFullScreen())
+                btn("媒体列表", v -> showMediaListDialog())
         ));
 
-        rootLayout.addView(row(
+        controls.addView(row(
                 btn("收藏当前", v -> addCurrentToFavorites()),
                 btn("最近播放", v -> switchToPlaylist(PLAYLIST_RECENT)),
                 btn("移出列表", v -> removeCurrentFromPlaylist()),
                 btn("清搜索", v -> clearSearch())
         ));
         mediaFilterButton = btn(filterButtonText(), v -> cycleMediaFilter());
-        rootLayout.addView(row(
+        controls.addView(row(
                 mediaFilterButton,
                 btn("排序", v -> sortCurrentPlaylist(false)),
                 btn("倒序", v -> sortCurrentPlaylist(true)),
@@ -452,7 +477,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         ));
 
         playlistSpinner = new Spinner(this);
-        rootLayout.addView(playlistSpinner, fullWrap());
+        controls.addView(playlistSpinner, fullWrap());
         playlistSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
                 String newPlaylist = String.valueOf(parent.getItemAtPosition(position));
@@ -470,7 +495,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         });
 
         listSummary = label("", 13, COLOR_SUBTLE);
-        rootLayout.addView(listSummary);
+        controls.addView(listSummary);
 
         searchBox = new EditText(this);
         searchBox.setSingleLine(true);
@@ -487,7 +512,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             }
             @Override public void afterTextChanged(Editable s) { }
         });
-        rootLayout.addView(searchBox, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)));
+        controls.addView(searchBox, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(44)));
 
         speedLabel = label("", 14, COLOR_SUBTLE);
         speedBar = new SeekBar(this);
@@ -497,8 +522,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             float speed = (progress + 25) / 100f;
             setSpeed(speed, true);
         }));
-        rootLayout.addView(speedLabel);
-        rootLayout.addView(speedBar);
+        controls.addView(speedLabel);
+        controls.addView(speedBar);
 
         volumeBar = new SeekBar(this);
         volumeBar.setMax(100);
@@ -507,19 +532,19 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             if (player != null) player.setVolume(progress / 100f);
             prefs.edit().putInt("volume", progress).apply();
         }));
-        rootLayout.addView(label("播放音量", 14, COLOR_SUBTLE));
-        rootLayout.addView(volumeBar);
+        controls.addView(label("播放音量", 14, COLOR_SUBTLE));
+        controls.addView(volumeBar);
 
         advancedToggleButton = btn("展开高级控制", v -> toggleAdvancedPanel());
-        rootLayout.addView(advancedToggleButton, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)));
+        controls.addView(advancedToggleButton, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(42)));
 
         advancedPanel = new LinearLayout(this);
         advancedPanel.setOrientation(LinearLayout.VERTICAL);
         advancedPanel.setVisibility(advancedVisible ? View.VISIBLE : View.GONE);
-        rootLayout.addView(advancedPanel, fullWrap());
+        controls.addView(advancedPanel, fullWrap());
 
         boostBar = new SeekBar(this);
-        boostBar.setMax(1500);
+        boostBar.setMax(3000);
         boostBar.setProgress(prefs.getInt("boost", 0));
         boostBar.setOnSeekBarChangeListener(simpleSeek((bar, progress, fromUser) -> {
             prefs.edit().putInt("boost", progress).apply();
@@ -547,10 +572,12 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         }));
         advancedPanel.addView(label("立体感增强", 14, COLOR_SUBTLE));
         advancedPanel.addView(stereoBar);
+        audioEffectStatus = label("音效状态：等待播放器准备", 13, COLOR_SUBTLE);
+        advancedPanel.addView(audioEffectStatus);
 
         loopLabel = label("", 14, COLOR_SUBTLE);
-        rootLayout.addView(loopLabel);
-        rootLayout.addView(row(
+        controls.addView(loopLabel);
+        controls.addView(row(
                 btn("循环模式", v -> cycleLoop()),
                 btn("A点", v -> setA()),
                 btn("B点", v -> setB()),
@@ -569,14 +596,20 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 btn("清位置", v -> clearCurrentPosition())
         ));
 
-        rootLayout.addView(row(
+        controls.addView(row(
                 btn("导入TXT", v -> pickText()),
                 btn("朗读/暂停", v -> speakText()),
                 btn("朗读分段", v -> showTextChunksDialog()),
-                btn("背景音乐", v -> pickBackground())
+                btn("男声优先", v -> preferMaleVoice())
+        ));
+        controls.addView(row(
+                btn("背景音乐", v -> pickBackground()),
+                btn("视频全屏", v -> enterVideoFullScreen()),
+                btn("系统TTS", v -> openTtsSettings()),
+                btn("停止朗读", v -> stopSpeaking())
         ));
         voiceSpinner = new Spinner(this);
-        rootLayout.addView(voiceSpinner, fullWrap());
+        controls.addView(voiceSpinner, fullWrap());
         ttsRateBar = new SeekBar(this);
         ttsRateBar.setMax(150);
         ttsRateBar.setProgress(prefs.getInt("ttsRate", 75));
@@ -608,7 +641,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         advancedPanel.addView(bgVolumeBar);
 
         status = label("请选择文件夹开始扫描", 14, COLOR_SUBTLE);
-        rootLayout.addView(status);
+        controls.addView(status);
 
         mediaList = new ListView(this);
         mediaList.setBackgroundColor(COLOR_PANEL);
@@ -622,7 +655,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 view.setTextSize(active ? 17 : 15);
                 view.setTypeface(Typeface.DEFAULT, active ? Typeface.BOLD : Typeface.NORMAL);
                 view.setPadding(dp(12), dp(8), dp(12), dp(8));
-                view.setBackgroundColor(active ? 0xFF22302D : COLOR_PANEL);
+                view.setBackgroundColor(active ? 0xFF4B2A12 : COLOR_PANEL);
                 return view;
             }
         };
@@ -641,8 +674,6 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             showQueueItemActions(visibleQueueIndexes.get(position));
             return true;
         });
-        rootLayout.addView(mediaList, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
-
         setContentView(rootLayout);
         advancedToggleButton.setText(advancedVisible ? "收起高级控制" : "展开高级控制");
         setSpeed((speedBar.getProgress() + 25) / 100f, false);
@@ -650,13 +681,15 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         updateLoopLabel();
         updatePlayPauseButton();
         updatePositionUi();
+        updateVideoControlVisibility();
+        updateVisualStage();
         applyPlaybackMode();
     }
 
     private LinearLayout buildVideoControlBar() {
         LinearLayout panel = new LinearLayout(this);
         panel.setOrientation(LinearLayout.VERTICAL);
-        panel.setBackgroundColor(0xDD101418);
+        panel.setBackgroundColor(0xDD160E09);
         panel.setPadding(dp(8), dp(6), dp(8), dp(8));
 
         videoControlSeekBar = new SeekBar(this);
@@ -1022,6 +1055,41 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         refreshMediaList();
     }
 
+    private void showMediaListDialog() {
+        if (queue.isEmpty()) {
+            status("当前列表为空");
+            return;
+        }
+        ListView dialogList = new ListView(this);
+        dialogList.setBackgroundColor(COLOR_PANEL);
+        dialogList.setAdapter(mediaAdapter);
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle(selectedPlaylist + " · " + visibleQueueIndexes.size() + "/" + queue.size())
+                .setView(dialogList)
+                .setNegativeButton("关闭", null)
+                .create();
+        dialogList.setOnItemClickListener((parent, view, position, id) -> {
+            if (position < 0 || position >= visibleQueueIndexes.size()) return;
+            int queueIndex = visibleQueueIndexes.get(position);
+            if (queueIndex == currentIndex) {
+                togglePlay();
+            } else {
+                playAt(queueIndex);
+            }
+            dialog.dismiss();
+        });
+        dialogList.setOnItemLongClickListener((parent, view, position, id) -> {
+            if (position < 0 || position >= visibleQueueIndexes.size()) return true;
+            showQueueItemActions(visibleQueueIndexes.get(position));
+            return true;
+        });
+        dialog.setOnShowListener(d -> {
+            int active = visibleQueueIndexes.indexOf(currentIndex);
+            if (active >= 0) dialogList.setSelection(active);
+        });
+        dialog.show();
+    }
+
     private String filterButtonText() {
         if ("audio".equals(mediaFilter)) return "仅音频";
         if ("video".equals(mediaFilter)) return "仅视频";
@@ -1066,6 +1134,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         refreshMediaList();
         updatePlayPauseButton();
         updateVideoKeepScreenOn();
+        updateVideoControlVisibility();
+        updateVisualStage();
         updatePositionUi();
         status("正在播放：" + entry.folderName);
     }
@@ -1097,6 +1167,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         }
         updatePlayPauseButton();
         updateVideoKeepScreenOn();
+        updateVideoControlVisibility();
+        updateVisualStage();
     }
 
     private void playRelative(int delta) {
@@ -1353,17 +1425,27 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             }
         }
         if (videoControlBar != null) videoControlBar.setVisibility(fullScreenVideo ? View.VISIBLE : View.GONE);
-        ViewGroup.LayoutParams params = playerView.getLayoutParams();
-        params.height = fullScreenVideo ? ViewGroup.LayoutParams.MATCH_PARENT : dp(210);
-        playerView.setLayoutParams(params);
+        if (playerView != null) playerView.setVisibility(View.VISIBLE);
+        if (visualView != null) visualView.setVisibility(View.GONE);
+        ViewGroup.LayoutParams rawParams = playerView.getLayoutParams();
+        if (rawParams instanceof LinearLayout.LayoutParams) {
+            LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) rawParams;
+            params.height = fullScreenVideo ? 0 : dp(210);
+            params.weight = fullScreenVideo ? 1f : 0f;
+            playerView.setLayoutParams(params);
+        } else {
+            rawParams.height = fullScreenVideo ? ViewGroup.LayoutParams.MATCH_PARENT : dp(210);
+            playerView.setLayoutParams(rawParams);
+        }
         applyVideoResizeMode();
         rootLayout.setPadding(fullScreenVideo ? 0 : dp(10), fullScreenVideo ? 0 : dp(10), fullScreenVideo ? 0 : dp(10), fullScreenVideo ? 0 : dp(10));
         setRequestedOrientation(fullScreenVideo ? ActivityInfo.SCREEN_ORIENTATION_FULL_SENSOR : ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
         getWindow().getDecorView().setSystemUiVisibility(fullScreenVideo
                 ? View.SYSTEM_UI_FLAG_FULLSCREEN | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
                 : View.SYSTEM_UI_FLAG_VISIBLE);
-        playerView.setUseController(fullScreenVideo && prefs.getBoolean("videoFullscreenControls", true));
+        playerView.setUseController(false);
         if (fullScreenVideo) showVideoController();
+        if (!fullScreenVideo) updateVideoControlVisibility();
         updateVideoKeepScreenOn();
         status(fullScreenVideo ? "已进入视频全屏，点画面显示控制条，返回退出" : "已退出全屏");
     }
@@ -1377,7 +1459,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         } else {
             getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         }
-        if (playerView != null && !fullScreenVideo) playerView.setUseController(false);
+        if (playerView != null) playerView.setUseController(false);
     }
 
     private void applyVideoResizeMode() {
@@ -1389,14 +1471,29 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void showVideoController() {
-        if (playerView == null || !prefs.getBoolean("videoFullscreenControls", true)) return;
-        playerView.setUseController(true);
-        playerView.showController();
-        if (videoControlBar != null && fullScreenVideo) {
+        if (playerView == null) return;
+        playerView.setUseController(false);
+        if (videoControlBar != null && currentEntry() != null && "video".equals(currentEntry().type)) {
             videoControlBar.setVisibility(View.VISIBLE);
             handler.removeCallbacks(hideVideoControls);
-            handler.postDelayed(hideVideoControls, player != null && player.isPlaying() ? 3500 : 7000);
+            if (fullScreenVideo && prefs.getBoolean("videoFullscreenControls", true)) {
+                handler.postDelayed(hideVideoControls, player != null && player.isPlaying() ? 3500 : 7000);
+            }
         }
+    }
+
+    private void updateVideoControlVisibility() {
+        if (videoControlBar == null) return;
+        MediaEntry entry = currentEntry();
+        boolean isVideo = entry != null && "video".equals(entry.type);
+        if (visualView != null) visualView.setVisibility(isVideo || fullScreenVideo ? View.GONE : View.VISIBLE);
+        if (playerView != null && !fullScreenVideo) playerView.setVisibility(isVideo ? View.VISIBLE : View.GONE);
+        if (fullScreenVideo) {
+            if (!isVideo) videoControlBar.setVisibility(View.GONE);
+            return;
+        }
+        handler.removeCallbacks(hideVideoControls);
+        videoControlBar.setVisibility(isVideo ? View.VISIBLE : View.GONE);
     }
 
     private final Runnable hideVideoControls = new Runnable() {
@@ -1474,9 +1571,47 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private final Runnable positionTicker = new Runnable() {
         @Override public void run() {
             updatePositionUi();
+            updateVisualStage();
             handler.postDelayed(this, 500);
         }
     };
+
+    private void updateVisualStage() {
+        if (visualView == null) return;
+        MediaEntry entry = currentEntry();
+        boolean reading = TextReaderService.isRunning() && !TextReaderService.isPaused();
+        boolean playing = reading || (player != null && player.isPlaying());
+        String title = entry == null ? "洞听播放器" : entry.title;
+        String subtitle = entry == null ? "耳朵在树洞里听见了声音" : entry.folderName;
+        String body = visualBodyText(entry, reading);
+        int boost = boostBar == null ? prefs.getInt("boost", 0) : boostBar.getProgress();
+        int bass = bassBar == null ? prefs.getInt("bass", 0) : bassBar.getProgress();
+        int stereo = stereoBar == null ? prefs.getInt("stereo", 0) : stereoBar.getProgress();
+        float effect = Math.min(1.8f, 0.45f + boost / 2600f + bass / 1600f + stereo / 1800f);
+        visualView.setState(title, subtitle, body, playing, reading, effect);
+    }
+
+    private String visualBodyText(@Nullable MediaEntry entry, boolean reading) {
+        if (reading || !importedText.trim().isEmpty() && entry == null) {
+            String chunk = currentReadingChunk();
+            if (!chunk.isEmpty()) return chunk;
+        }
+        if (entry == null) return "扫描文件夹或打开文件后，这里会显示封面、歌词或朗读文字。";
+        if ("audio".equals(entry.type)) {
+            return "暂无歌词\n" + playbackModeName() + " · " + (player == null ? "1.00x" : String.format(Locale.CHINA, "%.2fx", player.getPlaybackParameters().speed));
+        }
+        return "";
+    }
+
+    private String currentReadingChunk() {
+        if (importedText.trim().isEmpty()) return "";
+        if (textChunks.isEmpty()) textChunks.addAll(splitTextForTts(importedText));
+        if (textChunks.isEmpty()) return "";
+        int index = currentTextChunk;
+        if (!importedTextKey.isEmpty()) index = prefs.getInt("ttsChunk:" + importedTextKey, currentTextChunk);
+        index = Math.max(0, Math.min(index, textChunks.size() - 1));
+        return "朗读文字  " + (index + 1) + "/" + textChunks.size() + "\n" + textChunks.get(index);
+    }
 
     private void updatePositionUi() {
         if (player == null || positionBar == null || positionLabel == null || draggingPosition) return;
@@ -2412,6 +2547,41 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         });
     }
 
+    private void preferMaleVoice() {
+        if (voices.isEmpty() || voiceSpinner == null) {
+            status("当前系统 TTS 没有提供可选择的人声");
+            return;
+        }
+        int found = -1;
+        for (int i = 0; i < voices.size(); i++) {
+            String name = voices.get(i).getName().toLowerCase(Locale.ROOT);
+            if (name.contains("male") || name.contains("man") || name.contains("masculine") || name.contains("男")) {
+                found = i;
+                break;
+            }
+        }
+        if (found >= 0) {
+            voiceSpinner.setSelection(found);
+            prefs.edit().putString("ttsVoice", voices.get(found).getName()).apply();
+            if (tts != null) tts.setVoice(voices.get(found));
+            status("已切换到疑似男声：" + voices.get(found).getName());
+        } else {
+            status("系统 TTS 没标出男声，可在“系统TTS”里安装/选择更多语音包");
+        }
+    }
+
+    private void openTtsSettings() {
+        try {
+            startActivity(new Intent("com.android.settings.TTS_SETTINGS"));
+        } catch (RuntimeException ex) {
+            try {
+                startActivity(new Intent(TextToSpeech.Engine.ACTION_INSTALL_TTS_DATA));
+            } catch (RuntimeException ignored) {
+                startActivity(new Intent(Settings.ACTION_SETTINGS));
+            }
+        }
+    }
+
     private void pickText() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
@@ -2425,19 +2595,18 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             return;
         }
         if (!importedTextKey.isEmpty()) {
-            Intent service = new Intent(this, TextReaderService.class)
-                    .setAction(TextReaderService.ACTION_START)
-                    .putExtra(TextReaderService.EXTRA_TEXT_URI, importedTextKey);
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                startForegroundService(service);
+            if (TextReaderService.isRunning()) {
+                boolean wasPaused = TextReaderService.isPaused();
+                startTextReaderService(TextReaderService.ACTION_TOGGLE, null);
+                status(wasPaused ? "继续后台朗读" : "已暂停后台朗读");
             } else {
-                startService(service);
+                startTextReaderService(TextReaderService.ACTION_START, importedTextKey);
+                status("已开始后台朗读，可再次点击暂停/继续");
             }
-            status("已交给后台朗读，可在通知栏暂停/继续/停止");
             return;
         }
         if (tts == null) return;
-        if (tts.isSpeaking()) {
+        if (tts.isSpeaking() || !ttsPaused && !textChunks.isEmpty()) {
             stopSpeaking();
             return;
         }
@@ -2453,6 +2622,16 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         speakNextTextChunk();
         if (bgPlayer.getMediaItemCount() > 0) bgPlayer.play();
         status("开始朗读文本，共 " + textChunks.size() + " 段");
+    }
+
+    private void startTextReaderService(String action, @Nullable String textUri) {
+        Intent service = new Intent(this, TextReaderService.class).setAction(action);
+        if (textUri != null) service.putExtra(TextReaderService.EXTRA_TEXT_URI, textUri);
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && TextReaderService.ACTION_START.equals(action)) {
+            startForegroundService(service);
+        } else {
+            startService(service);
+        }
     }
 
     private void speakNextTextChunk() {
@@ -2524,7 +2703,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void stopSpeaking() {
-        stopService(new Intent(this, TextReaderService.class));
+        if (TextReaderService.isRunning()) {
+            startTextReaderService(TextReaderService.ACTION_STOP, null);
+        } else {
+            stopService(new Intent(this, TextReaderService.class));
+        }
         if (tts != null) tts.stop();
         ttsPaused = true;
         if (!importedTextKey.isEmpty()) prefs.edit().putInt("ttsChunk:" + importedTextKey, Math.max(0, currentTextChunk - 1)).apply();
@@ -2576,47 +2759,91 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             importedText = restored;
             importedTextKey = raw;
             currentTextChunk = prefs.getInt("ttsChunk:" + importedTextKey, 0);
+            textChunks.clear();
             status("已恢复上次导入的文本");
         }
     }
 
     private void attachLoudnessEnhancer() {
         if (player == null) return;
+        int sessionId = player.getAudioSessionId();
+        if (sessionId == C.AUDIO_SESSION_ID_UNSET) {
+            setAudioEffectStatus("音效状态：等待音频会话建立");
+            return;
+        }
         try {
-            if (loudnessEnhancer != null) loudnessEnhancer.release();
-            if (bassBoost != null) bassBoost.release();
-            if (virtualizer != null) virtualizer.release();
-            loudnessEnhancer = new LoudnessEnhancer(player.getAudioSessionId());
-            loudnessEnhancer.setEnabled(true);
-            bassBoost = new BassBoost(0, player.getAudioSessionId());
-            bassBoost.setEnabled(true);
-            virtualizer = new Virtualizer(0, player.getAudioSessionId());
-            virtualizer.setEnabled(true);
+            releaseAudioEffects();
+            loudnessEnhancer = new LoudnessEnhancer(sessionId);
+            bassBoost = new BassBoost(0, sessionId);
+            virtualizer = new Virtualizer(0, sessionId);
             applyAudioEffects();
         } catch (RuntimeException ex) {
-            status("当前设备不支持部分系统音效");
+            setAudioEffectStatus("音效状态：当前设备或输出不支持系统音效");
+            status("当前设备或蓝牙/投放输出可能不支持这些系统音效");
         }
     }
 
     private void applyAudioEffects() {
+        int boost = boostBar == null ? prefs.getInt("boost", 0) : boostBar.getProgress();
+        int bass = bassBar == null ? prefs.getInt("bass", 0) : bassBar.getProgress();
+        int stereo = stereoBar == null ? prefs.getInt("stereo", 0) : stereoBar.getProgress();
+        boolean loudnessOk = false;
+        boolean bassOk = false;
+        boolean stereoOk = false;
         if (loudnessEnhancer != null) {
             try {
-                loudnessEnhancer.setTargetGain(boostBar.getProgress());
+                loudnessEnhancer.setEnabled(boost > 0);
+                loudnessEnhancer.setTargetGain(boost);
+                loudnessOk = loudnessEnhancer.getEnabled();
             } catch (RuntimeException ignored) {
             }
         }
         if (bassBoost != null) {
             try {
-                bassBoost.setStrength((short) bassBar.getProgress());
+                bassBoost.setEnabled(bass > 0);
+                bassBoost.setStrength((short) bass);
+                bassOk = bassBoost.getEnabled() && bassBoost.hasControl();
             } catch (RuntimeException ignored) {
             }
         }
         if (virtualizer != null) {
             try {
-                virtualizer.setStrength((short) stereoBar.getProgress());
+                virtualizer.setEnabled(stereo > 0);
+                virtualizer.setStrength((short) stereo);
+                stereoOk = virtualizer.getEnabled() && virtualizer.hasControl();
             } catch (RuntimeException ignored) {
             }
         }
+        setAudioEffectStatus(String.format(Locale.CHINA,
+                "音效状态：增益 %s（%.1f dB） · 低音 %s（%d%%） · 立体 %s（%d%%）",
+                boost > 0 && loudnessOk ? "已启用" : "未启用",
+                boost / 100f,
+                bass > 0 && bassOk ? "已启用" : "未启用",
+                bass / 10,
+                stereo > 0 && stereoOk ? "已启用" : "未启用",
+                stereo / 10));
+    }
+
+    private void setAudioEffectStatus(String text) {
+        if (audioEffectStatus != null) audioEffectStatus.setText(text);
+    }
+
+    private void releaseAudioEffects() {
+        try {
+            if (loudnessEnhancer != null) loudnessEnhancer.release();
+        } catch (RuntimeException ignored) {
+        }
+        try {
+            if (bassBoost != null) bassBoost.release();
+        } catch (RuntimeException ignored) {
+        }
+        try {
+            if (virtualizer != null) virtualizer.release();
+        } catch (RuntimeException ignored) {
+        }
+        loudnessEnhancer = null;
+        bassBoost = null;
+        virtualizer = null;
     }
 
     private void showSettingsDialog() {
@@ -2786,6 +3013,162 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         return MediaUtils.formatMs(ms);
     }
 
+    private class DongtingVisualView extends View {
+        private final Paint paint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Path path = new Path();
+        private final RectF rect = new RectF();
+        private String title = "洞听播放器";
+        private String subtitle = "耳朵在树洞里听见了声音";
+        private String body = "扫描文件夹或打开文件后，这里会显示封面、歌词或朗读文字。";
+        private boolean active;
+        private boolean reading;
+        private float effect = 0.6f;
+        private final long startedAt = System.currentTimeMillis();
+
+        DongtingVisualView(Context context) {
+            super(context);
+            setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+        }
+
+        void setState(String nextTitle, String nextSubtitle, String nextBody, boolean nextActive, boolean nextReading, float nextEffect) {
+            title = nextTitle == null || nextTitle.trim().isEmpty() ? "洞听播放器" : nextTitle;
+            subtitle = nextSubtitle == null || nextSubtitle.trim().isEmpty() ? "耳朵在树洞里听见了声音" : nextSubtitle;
+            body = nextBody == null || nextBody.trim().isEmpty() ? "暂无歌词" : nextBody;
+            active = nextActive;
+            reading = nextReading;
+            effect = Math.max(0.25f, Math.min(2f, nextEffect));
+            invalidate();
+        }
+
+        @Override
+        protected void onDraw(Canvas canvas) {
+            super.onDraw(canvas);
+            int width = getWidth();
+            int height = getHeight();
+            if (width <= 0 || height <= 0) return;
+            float t = (System.currentTimeMillis() - startedAt) / 1000f;
+            paint.setShader(new LinearGradient(0, 0, width, height,
+                    new int[]{0xFF21140C, 0xFF5A3114, 0xFF101817},
+                    new float[]{0f, 0.48f, 1f}, Shader.TileMode.CLAMP));
+            canvas.drawRoundRect(0, 0, width, height, dp(8), dp(8), paint);
+            paint.setShader(null);
+            drawTreeHole(canvas, width, height, t);
+            drawStageText(canvas, width, height, t);
+            drawParticles(canvas, width, height, t);
+            if (active || reading) postInvalidateDelayed(33);
+        }
+
+        private void drawTreeHole(Canvas canvas, int width, int height, float t) {
+            float cx = width * 0.25f;
+            float cy = height * 0.52f;
+            float r = Math.min(width, height) * 0.34f;
+            paint.setStyle(Paint.Style.FILL);
+            paint.setColor(0xFF743B16);
+            rect.set(cx - r * 0.88f, cy - r, cx + r * 0.88f, cy + r);
+            canvas.drawOval(rect, paint);
+            paint.setColor(0xFF140B07);
+            rect.set(cx - r * 0.58f, cy - r * 0.72f, cx + r * 0.58f, cy + r * 0.72f);
+            canvas.drawOval(rect, paint);
+
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(3));
+            paint.setColor(0xAAFFB451);
+            for (int i = 0; i < 4; i++) {
+                float pulse = active || reading ? (float) Math.sin(t * 2.4f + i) * effect * 2.5f : 0f;
+                float rr = r * (0.25f + i * 0.14f) + pulse;
+                rect.set(cx - rr, cy - rr * 0.72f, cx + rr, cy + rr * 0.72f);
+                canvas.drawOval(rect, paint);
+            }
+
+            paint.setStrokeWidth(dp(5));
+            paint.setStrokeCap(Paint.Cap.ROUND);
+            paint.setColor(0xFFFFC66D);
+            path.reset();
+            path.moveTo(cx - r * 0.08f, cy - r * 0.22f);
+            path.cubicTo(cx + r * 0.30f, cy - r * 0.42f, cx + r * 0.42f, cy + r * 0.15f, cx + r * 0.08f, cy + r * 0.28f);
+            path.cubicTo(cx - r * 0.10f, cy + r * 0.36f, cx - r * 0.14f, cy + r * 0.10f, cx + r * 0.02f, cy + r * 0.02f);
+            canvas.drawPath(path, paint);
+        }
+
+        private void drawParticles(Canvas canvas, int width, int height, float t) {
+            float baseX = width * 0.43f;
+            float endX = width - dp(16);
+            float midY = height - dp(22);
+            float waveHeight = dp(reading ? 7 : 10) * effect;
+            paint.setStyle(Paint.Style.STROKE);
+            paint.setStrokeWidth(dp(1));
+            paint.setColor(0x66FFB451);
+            canvas.drawLine(baseX, midY, endX, midY, paint);
+
+            paint.setStyle(Paint.Style.FILL);
+            for (int i = 0; i < 24; i++) {
+                float speed = active || reading ? 0.12f + effect * 0.08f : 0.025f;
+                float p = (i * 0.137f + t * speed) % 1f;
+                float wave = (float) Math.sin(t * (2.2f + i * 0.07f) + i);
+                float x = baseX + p * (endX - baseX);
+                float y = midY + wave * waveHeight;
+                float size = dp(1) + (i % 4) * 0.8f + Math.abs(wave) * effect;
+                int alpha = active || reading ? 150 + (int) (80 * Math.abs(wave)) : 65;
+                paint.setColor((alpha << 24) | (reading ? 0x00FFD36A : 0x00E9B05D));
+                canvas.drawCircle(x, y, size, paint);
+            }
+        }
+
+        private void drawStageText(Canvas canvas, int width, int height, float t) {
+            float left = width * 0.43f;
+            float right = width - dp(14);
+            textPaint.setShader(null);
+            textPaint.setTypeface(Typeface.DEFAULT_BOLD);
+            textPaint.setTextSize(dp(18));
+            textPaint.setColor(COLOR_TEXT);
+            drawSingleLine(canvas, title, left, dp(34), right - left, textPaint);
+
+            textPaint.setTypeface(Typeface.DEFAULT);
+            textPaint.setTextSize(dp(12));
+            textPaint.setColor(COLOR_SUBTLE);
+            drawSingleLine(canvas, subtitle, left, dp(56), right - left, textPaint);
+
+            textPaint.setTextSize(reading ? dp(15) : dp(14));
+            textPaint.setColor(reading ? 0xFFFFD36A : 0xFFEAD9BE);
+            List<String> lines = wrapText(body.replace("\r", "").replace("\n", "  "), textPaint, right - left);
+            int maxLines = Math.max(3, (height - dp(104)) / dp(24));
+            int offset = reading && lines.size() > maxLines ? ((int) (t / 2.2f)) % lines.size() : 0;
+            float y = dp(86);
+            for (int i = 0; i < Math.min(maxLines, lines.size()); i++) {
+                canvas.drawText(lines.get((offset + i) % lines.size()), left, y, textPaint);
+                y += dp(24);
+            }
+        }
+
+        private void drawSingleLine(Canvas canvas, String text, float x, float y, float maxWidth, Paint p) {
+            String value = text == null ? "" : text;
+            boolean shortened = false;
+            while (value.length() > 1 && p.measureText(value) > maxWidth) {
+                value = value.substring(0, value.length() - 2);
+                shortened = true;
+            }
+            canvas.drawText(shortened ? value + "..." : value, x, y, p);
+        }
+
+        private List<String> wrapText(String text, Paint p, float maxWidth) {
+            List<String> lines = new ArrayList<>();
+            String value = text == null ? "" : text.trim();
+            StringBuilder line = new StringBuilder();
+            for (int i = 0; i < value.length(); i++) {
+                char ch = value.charAt(i);
+                line.append(ch);
+                if (p.measureText(line.toString()) >= maxWidth || ch == '。' || ch == '！' || ch == '？') {
+                    lines.add(line.toString().trim());
+                    line.setLength(0);
+                }
+            }
+            if (line.length() > 0) lines.add(line.toString().trim());
+            if (lines.isEmpty()) lines.add("暂无歌词");
+            return lines;
+        }
+    }
+
     @Override
     protected void onPause() {
         super.onPause();
@@ -2797,9 +3180,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         super.onDestroy();
         handler.removeCallbacksAndMessages(null);
         saveCurrentPosition();
-        if (loudnessEnhancer != null) loudnessEnhancer.release();
-        if (bassBoost != null) bassBoost.release();
-        if (virtualizer != null) virtualizer.release();
+        releaseAudioEffects();
         if (playbackService != null) playbackService.refreshNotification();
         try {
             unbindService(playbackConnection);

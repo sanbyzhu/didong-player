@@ -42,6 +42,8 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
     private static final String PREFS = "dongting_player";
     private static final String CHANNEL_ID = "dongting_text_reader";
     private static final int NOTIFICATION_ID = 20260503;
+    private static boolean serviceRunning = false;
+    private static boolean servicePaused = true;
 
     private final List<String> chunks = new ArrayList<>();
     private SharedPreferences prefs;
@@ -56,6 +58,8 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
     @Override
     public void onCreate() {
         super.onCreate();
+        serviceRunning = true;
+        servicePaused = true;
         prefs = getSharedPreferences(PREFS, MODE_PRIVATE);
         createNotificationChannel();
         AudioAttributes attrs = new AudioAttributes.Builder()
@@ -132,12 +136,22 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
 
     @Override
     public void onDestroy() {
+        serviceRunning = false;
+        servicePaused = true;
         if (tts != null) {
             tts.stop();
             tts.shutdown();
         }
         if (bgPlayer != null) bgPlayer.release();
         super.onDestroy();
+    }
+
+    static boolean isRunning() {
+        return serviceRunning;
+    }
+
+    static boolean isPaused() {
+        return servicePaused;
     }
 
     private void loadText(Uri uri) {
@@ -155,6 +169,7 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
             return;
         }
         paused = false;
+        servicePaused = false;
         applyTtsSettings();
         startBackgroundMusic();
         updateNotification(true);
@@ -180,6 +195,7 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
 
     private void pauseReading() {
         paused = true;
+        servicePaused = true;
         if (tts != null) tts.stop();
         if (bgPlayer != null) bgPlayer.pause();
         if (!textUri.isEmpty()) prefs.edit().putInt("ttsChunk:" + textUri, currentChunk).apply();
@@ -188,6 +204,7 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
 
     private void stopReading() {
         paused = true;
+        servicePaused = true;
         if (tts != null) tts.stop();
         if (bgPlayer != null) bgPlayer.pause();
         stopForeground(STOP_FOREGROUND_REMOVE);
