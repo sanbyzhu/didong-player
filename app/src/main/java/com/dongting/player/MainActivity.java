@@ -453,6 +453,12 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 btn("B-1秒", v -> adjustAbPoint(false, -1000)),
                 btn("B+1秒", v -> adjustAbPoint(false, 1000))
         ));
+        advancedPanel.addView(row(
+                btn("加书签", v -> addBookmark()),
+                btn("书签列表", v -> showBookmarks()),
+                btn("回到开头", v -> seekToStart()),
+                btn("清位置", v -> clearCurrentPosition())
+        ));
 
         rootLayout.addView(row(
                 btn("导入TXT", v -> pickText()),
@@ -914,6 +920,115 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         abEnabled = abA != C.TIME_UNSET && abB != C.TIME_UNSET && abB > abA;
         persistAb();
         updateLoopLabel();
+    }
+
+    private void addBookmark() {
+        MediaEntry entry = currentEntry();
+        if (entry == null || player == null) {
+            status("当前没有可添加书签的媒体");
+            return;
+        }
+        long position = player.getCurrentPosition();
+        List<Bookmark> marks = loadBookmarks(entry.uri);
+        for (Bookmark mark : marks) {
+            if (Math.abs(mark.positionMs - position) < 1500) {
+                status("附近已经有书签：" + formatMs(mark.positionMs));
+                return;
+            }
+        }
+        marks.add(new Bookmark(position, formatMs(position)));
+        Collections.sort(marks, (a, b) -> Long.compare(a.positionMs, b.positionMs));
+        saveBookmarks(entry.uri, marks);
+        status("已添加书签：" + formatMs(position));
+    }
+
+    private void showBookmarks() {
+        MediaEntry entry = currentEntry();
+        if (entry == null || player == null) {
+            status("当前没有媒体");
+            return;
+        }
+        List<Bookmark> marks = loadBookmarks(entry.uri);
+        if (marks.isEmpty()) {
+            status("当前媒体还没有书签");
+            return;
+        }
+        String[] labels = new String[marks.size()];
+        for (int i = 0; i < marks.size(); i++) {
+            labels[i] = marks.get(i).label;
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("书签：" + entry.title)
+                .setItems(labels, (dialog, which) -> {
+                    Bookmark mark = marks.get(which);
+                    player.seekTo(mark.positionMs);
+                    status("已跳转：" + mark.label);
+                })
+                .setNegativeButton("删除书签", (dialog, which) -> showDeleteBookmarkDialog(entry.uri, marks))
+                .show();
+    }
+
+    private void showDeleteBookmarkDialog(String uri, List<Bookmark> marks) {
+        String[] labels = new String[marks.size()];
+        for (int i = 0; i < marks.size(); i++) labels[i] = marks.get(i).label;
+        new AlertDialog.Builder(this)
+                .setTitle("删除哪个书签？")
+                .setItems(labels, (dialog, which) -> {
+                    Bookmark removed = marks.remove(which);
+                    saveBookmarks(uri, marks);
+                    status("已删除书签：" + removed.label);
+                })
+                .show();
+    }
+
+    private void seekToStart() {
+        if (player == null) return;
+        player.seekTo(0);
+        saveCurrentPositionAsZero();
+        updatePositionUi();
+        status("已回到开头");
+    }
+
+    private void clearCurrentPosition() {
+        MediaEntry entry = currentEntry();
+        if (entry == null) {
+            status("当前没有媒体");
+            return;
+        }
+        prefs.edit().remove("pos:" + entry.uri).apply();
+        if (player != null) player.seekTo(0);
+        updatePositionUi();
+        status("已清除当前媒体的播放位置");
+    }
+
+    private List<Bookmark> loadBookmarks(String uri) {
+        List<Bookmark> marks = new ArrayList<>();
+        String raw = prefs.getString("bookmarks:" + uri, "[]");
+        try {
+            JSONArray array = new JSONArray(raw);
+            for (int i = 0; i < array.length(); i++) {
+                JSONObject obj = array.getJSONObject(i);
+                long position = obj.optLong("position", 0);
+                String label = obj.optString("label", formatMs(position));
+                marks.add(new Bookmark(position, label));
+            }
+        } catch (JSONException ignored) {
+        }
+        return marks;
+    }
+
+    private void saveBookmarks(String uri, List<Bookmark> marks) {
+        JSONArray array = new JSONArray();
+        for (Bookmark mark : marks) {
+            JSONObject obj = new JSONObject();
+            try {
+                obj.put("position", mark.positionMs);
+                obj.put("label", mark.label);
+                array.put(obj);
+            } catch (JSONException ignored) {
+            }
+        }
+        prefs.edit().putString("bookmarks:" + uri, array.toString()).apply();
     }
 
     private void loadAb(String uri) {
@@ -1682,6 +1797,16 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private interface SeekHandler {
         void onChanged(SeekBar bar, int progress, boolean fromUser);
+    }
+
+    private static class Bookmark {
+        final long positionMs;
+        final String label;
+
+        Bookmark(long positionMs, String label) {
+            this.positionMs = positionMs;
+            this.label = label;
+        }
     }
 
     private static class MediaEntry {
