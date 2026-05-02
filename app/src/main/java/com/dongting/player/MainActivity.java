@@ -123,6 +123,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private SeekBar boostBar;
     private SeekBar bassBar;
     private SeekBar stereoBar;
+    private SeekBar ttsRateBar;
+    private SeekBar ttsPitchBar;
     private SeekBar bgVolumeBar;
 
     private int currentIndex = -1;
@@ -434,6 +436,12 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 btn("B点", v -> setB()),
                 btn("清AB", v -> clearAb())
         ));
+        rootLayout.addView(row(
+                btn("A-1秒", v -> adjustAbPoint(true, -1000)),
+                btn("A+1秒", v -> adjustAbPoint(true, 1000)),
+                btn("B-1秒", v -> adjustAbPoint(false, -1000)),
+                btn("B+1秒", v -> adjustAbPoint(false, 1000))
+        ));
 
         rootLayout.addView(row(
                 btn("导入TXT", v -> pickText()),
@@ -443,6 +451,26 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         ));
         voiceSpinner = new Spinner(this);
         rootLayout.addView(voiceSpinner, fullWrap());
+        ttsRateBar = new SeekBar(this);
+        ttsRateBar.setMax(150);
+        ttsRateBar.setProgress(prefs.getInt("ttsRate", 75));
+        ttsRateBar.setOnSeekBarChangeListener(simpleSeek((bar, progress, fromUser) -> {
+            prefs.edit().putInt("ttsRate", progress).apply();
+            applyTtsSettings();
+        }));
+        rootLayout.addView(label("朗读语速", 14, COLOR_SUBTLE));
+        rootLayout.addView(ttsRateBar);
+
+        ttsPitchBar = new SeekBar(this);
+        ttsPitchBar.setMax(100);
+        ttsPitchBar.setProgress(prefs.getInt("ttsPitch", 50));
+        ttsPitchBar.setOnSeekBarChangeListener(simpleSeek((bar, progress, fromUser) -> {
+            prefs.edit().putInt("ttsPitch", progress).apply();
+            applyTtsSettings();
+        }));
+        rootLayout.addView(label("朗读音调", 14, COLOR_SUBTLE));
+        rootLayout.addView(ttsPitchBar);
+
         bgVolumeBar = new SeekBar(this);
         bgVolumeBar.setMax(100);
         bgVolumeBar.setProgress(prefs.getInt("bgVolume", 25));
@@ -843,6 +871,29 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         updateLoopLabel();
     }
 
+    private void adjustAbPoint(boolean adjustA, long deltaMs) {
+        if (adjustA) {
+            if (abA == C.TIME_UNSET) {
+                status("请先设置 A 点");
+                return;
+            }
+            abA = Math.max(0, abA + deltaMs);
+            if (abB != C.TIME_UNSET && abA >= abB) abA = Math.max(0, abB - 1000);
+            status("A 点：" + formatMs(abA));
+        } else {
+            if (abB == C.TIME_UNSET) {
+                status("请先设置 B 点");
+                return;
+            }
+            abB = Math.max(0, abB + deltaMs);
+            if (abA != C.TIME_UNSET && abB <= abA) abB = abA + 1000;
+            status("B 点：" + formatMs(abB));
+        }
+        abEnabled = abA != C.TIME_UNSET && abB != C.TIME_UNSET && abB > abA;
+        persistAb();
+        updateLoopLabel();
+    }
+
     private void loadAb(String uri) {
         if (player == null) return;
         abA = C.TIME_UNSET;
@@ -903,21 +954,54 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void showPlaylistManager() {
-        String[] options = {"把扫描结果加入当前列表", "重命名当前列表", "删除当前列表", "清空最近播放"};
+        String[] options = {"刷新上次文件夹", "按数字/名称排序当前列表", "倒序当前列表", "把扫描结果加入当前列表", "重命名当前列表", "删除当前列表", "清空最近播放"};
         new AlertDialog.Builder(this)
                 .setTitle("列表管理：" + selectedPlaylist)
                 .setItems(options, (dialog, which) -> {
                     if (which == 0) {
-                        addLibraryToPlaylist();
+                        refreshLastFolder();
                     } else if (which == 1) {
-                        renameCurrentPlaylist();
+                        sortCurrentPlaylist(false);
                     } else if (which == 2) {
+                        sortCurrentPlaylist(true);
+                    } else if (which == 3) {
+                        addLibraryToPlaylist();
+                    } else if (which == 4) {
+                        renameCurrentPlaylist();
+                    } else if (which == 5) {
                         deleteCurrentPlaylist();
                     } else {
                         clearRecentPlaylist();
                     }
                 })
                 .show();
+    }
+
+    private void refreshLastFolder() {
+        String raw = prefs.getString("lastFolder", "");
+        if (raw.isEmpty()) {
+            status("还没有上次扫描的文件夹");
+            return;
+        }
+        scanFolder(Uri.parse(raw));
+    }
+
+    private void sortCurrentPlaylist(boolean reverse) {
+        List<MediaEntry> items = playlists.get(selectedPlaylist);
+        if (items == null || items.isEmpty()) {
+            status("当前列表为空");
+            return;
+        }
+        if (PLAYLIST_RECENT.equals(selectedPlaylist)) {
+            status("最近播放按播放时间排序，不手动排序");
+            return;
+        }
+        Collections.sort(items, this::compareMedia);
+        if (reverse) Collections.reverse(items);
+        savePlaylists();
+        currentIndex = -1;
+        setQueue(items, false);
+        status(reverse ? "已倒序当前列表" : "已按数字/名称排序当前列表");
     }
 
     private void renameCurrentPlaylist() {
@@ -1183,6 +1267,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     public void onInit(int statusCode) {
         if (statusCode == TextToSpeech.SUCCESS) {
             tts.setLanguage(Locale.CHINA);
+            applyTtsSettings();
             tts.setOnUtteranceProgressListener(new UtteranceProgressListener() {
                 @Override public void onStart(String utteranceId) { }
 
@@ -1241,8 +1326,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         }
         int selected = voiceSpinner.getSelectedItemPosition();
         if (selected >= 0 && selected < voices.size()) tts.setVoice(voices.get(selected));
-        tts.setPitch(1.0f);
-        tts.setSpeechRate(1.0f);
+        applyTtsSettings();
         textChunks.clear();
         textChunks.addAll(splitTextForTts(importedText));
         currentTextChunk = 0;
@@ -1283,6 +1367,14 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         if (builder.length() > 0) chunks.add(builder.toString().trim());
         if (chunks.isEmpty()) chunks.add(normalized);
         return chunks;
+    }
+
+    private void applyTtsSettings() {
+        if (tts == null) return;
+        float rate = 0.5f + (prefs.getInt("ttsRate", 75) / 100f);
+        float pitch = 0.5f + (prefs.getInt("ttsPitch", 50) / 100f);
+        tts.setSpeechRate(rate);
+        tts.setPitch(pitch);
     }
 
     private void stopSpeaking() {
