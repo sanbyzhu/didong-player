@@ -94,6 +94,12 @@
 - 朗读文本支持系统 TTS `onRangeStart` 字词级回调检测，设备自检里会显示高亮能力状态。
 - 背景音乐管理面板升级为可视列表，支持选中播放、删除当前、上移、下移、设默认、清空、单曲循环和列表循环，并在首页显示当前背景音乐状态。
 
+## Windows 尝鲜版
+- 已新增免安装网页原型：[DongtingPlayer.html](windows/DongtingPlayer.html)。
+- Windows 上可双击 [启动洞听Windows版.bat](windows/启动洞听Windows版.bat)，或直接用 Edge/Chrome 打开 `windows/DongtingPlayer.html`。
+- 当前支持扫描文件夹、按文件夹生成列表、自然数字排序、音频/视频播放、0.25x 到 8x 倍速、按文件夹和媒体类型记忆倍速、播放位置记忆、单曲循环、列表循环、AB 循环、TXT/JSON 朗读和背景音乐。
+- 这是第一版桌面尝试，基于浏览器本地能力实现；浏览器出于安全限制不会永久保存文件授权，下次打开通常需要重新扫描文件夹。
+
 ```powershell
 .\gradlew.bat assembleDebug
 ```

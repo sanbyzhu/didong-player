@@ -1,0 +1,815 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>洞听播放器 Windows 尝鲜版</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #160e09;
+      --panel: #24160e;
+      --panel-2: #332012;
+      --line: #5a351a;
+      --text: #fff4e2;
+      --muted: #d8b98d;
+      --accent: #ffb451;
+      --accent-2: #ffd36a;
+      --danger: #ff7e67;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      background:
+        radial-gradient(circle at 18% 18%, rgba(255, 180, 81, .12), transparent 28%),
+        linear-gradient(135deg, #110905 0%, var(--bg) 48%, #291407 100%);
+      color: var(--text);
+      font-family: "Microsoft YaHei", "Segoe UI", sans-serif;
+    }
+    button, input, select {
+      font: inherit;
+    }
+    button {
+      min-height: 36px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: linear-gradient(180deg, #3b2412, #25140a);
+      color: var(--text);
+      cursor: pointer;
+      padding: 7px 11px;
+    }
+    button:hover { border-color: var(--accent); }
+    button.primary {
+      color: #1b0f07;
+      background: linear-gradient(180deg, #ffd36a, #ff9f32);
+      border-color: #ffd36a;
+      font-weight: 700;
+    }
+    button.danger { color: var(--danger); }
+    input[type="range"] { accent-color: var(--accent); }
+    select, input[type="text"] {
+      background: #120905;
+      color: var(--text);
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      min-height: 36px;
+      padding: 6px 9px;
+    }
+    .app {
+      display: grid;
+      grid-template-columns: minmax(280px, 380px) 1fr minmax(260px, 340px);
+      gap: 14px;
+      padding: 14px;
+      min-height: 100vh;
+    }
+    .panel {
+      background: rgba(36, 22, 14, .92);
+      border: 1px solid rgba(255, 180, 81, .18);
+      border-radius: 10px;
+      overflow: hidden;
+      box-shadow: 0 18px 50px rgba(0, 0, 0, .25);
+    }
+    .panel header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      padding: 12px;
+      border-bottom: 1px solid rgba(255, 180, 81, .16);
+      background: rgba(255, 180, 81, .06);
+    }
+    h1, h2 {
+      margin: 0;
+      letter-spacing: 0;
+    }
+    h1 { font-size: 22px; }
+    h2 { font-size: 16px; }
+    .subtle { color: var(--muted); font-size: 13px; }
+    .stack { display: grid; gap: 10px; padding: 12px; }
+    .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .row > button, .row > select { flex: 1 1 auto; }
+    .hidden-input {
+      width: 1px;
+      height: 1px;
+      opacity: 0;
+      pointer-events: none;
+      position: absolute;
+    }
+    .folders, .tracks, .bg-list {
+      display: grid;
+      gap: 6px;
+      max-height: 34vh;
+      overflow: auto;
+      padding-right: 3px;
+    }
+    .item {
+      display: grid;
+      gap: 3px;
+      width: 100%;
+      text-align: left;
+      border-radius: 8px;
+      border: 1px solid rgba(255, 180, 81, .1);
+      background: rgba(255, 244, 226, .035);
+      padding: 9px;
+      color: var(--text);
+    }
+    .item.active {
+      border-color: var(--accent);
+      background: rgba(255, 180, 81, .16);
+    }
+    .item .name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .stage {
+      display: grid;
+      grid-template-rows: auto minmax(300px, 1fr) auto;
+      min-height: calc(100vh - 28px);
+    }
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 14px;
+      border-bottom: 1px solid rgba(255, 180, 81, .16);
+    }
+    .logo {
+      width: 52px;
+      height: 52px;
+      border-radius: 14px;
+      background:
+        radial-gradient(circle at 48% 45%, transparent 11%, #3a210f 12%, #3a210f 23%, transparent 24%),
+        radial-gradient(circle at 50% 54%, #0b0503 0 17%, transparent 18%),
+        radial-gradient(circle at 48% 46%, #ffc96d 0 44%, #e87523 45% 70%, #653215 71%);
+      border: 1px solid rgba(255, 211, 106, .45);
+    }
+    .media-box {
+      display: grid;
+      place-items: center;
+      padding: 14px;
+      background:
+        radial-gradient(circle at center, rgba(255, 180, 81, .08), transparent 45%),
+        #100804;
+      position: relative;
+      overflow: hidden;
+    }
+    video, audio {
+      width: 100%;
+      max-height: 100%;
+      outline: none;
+    }
+    video {
+      height: min(62vh, 680px);
+      object-fit: contain;
+      background: #050302;
+      border-radius: 8px;
+    }
+    audio { max-width: 720px; }
+    .cover {
+      min-height: 260px;
+      width: min(620px, 100%);
+      display: grid;
+      place-items: center;
+      border-radius: 16px;
+      border: 1px solid rgba(255, 180, 81, .18);
+      background:
+        radial-gradient(circle at 50% 48%, transparent 0 10%, #2b160a 11% 22%, transparent 23%),
+        radial-gradient(circle at 50% 50%, #090402 0 20%, transparent 21%),
+        linear-gradient(135deg, #553019, #f0a145 54%, #32190c);
+      color: rgba(255, 244, 226, .9);
+      font-size: 20px;
+      text-align: center;
+      padding: 24px;
+    }
+    .lyric {
+      position: absolute;
+      left: 22px;
+      right: 22px;
+      bottom: 22px;
+      text-align: center;
+      padding: 10px 14px;
+      border-radius: 10px;
+      color: var(--accent-2);
+      background: rgba(9, 4, 2, .58);
+      backdrop-filter: blur(6px);
+      white-space: pre-wrap;
+    }
+    .controls {
+      display: grid;
+      gap: 10px;
+      padding: 12px;
+      border-top: 1px solid rgba(255, 180, 81, .16);
+    }
+    .progress-row {
+      display: grid;
+      grid-template-columns: 58px 1fr 58px;
+      align-items: center;
+      gap: 10px;
+      color: var(--muted);
+      font-variant-numeric: tabular-nums;
+    }
+    .status-line {
+      min-height: 22px;
+      color: var(--muted);
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .reader-text {
+      min-height: 170px;
+      max-height: 34vh;
+      overflow: auto;
+      padding: 12px;
+      border-radius: 10px;
+      background: #120905;
+      border: 1px solid rgba(255, 180, 81, .16);
+      line-height: 1.75;
+      white-space: pre-wrap;
+    }
+    .reader-text mark {
+      background: rgba(255, 180, 81, .32);
+      color: var(--text);
+      border-radius: 4px;
+      padding: 0 2px;
+    }
+    @media (max-width: 1100px) {
+      .app { grid-template-columns: 1fr; }
+      .stage { min-height: 640px; }
+      .folders, .tracks, .bg-list { max-height: 240px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside class="panel">
+      <header>
+        <h2>媒体库</h2>
+        <span class="subtle" id="libraryCount">0 个文件</span>
+      </header>
+      <div class="stack">
+        <input id="folderPicker" class="hidden-input" type="file" webkitdirectory multiple>
+        <input id="filePicker" class="hidden-input" type="file" multiple accept="audio/*,video/*,.mp3,.flac,.wav,.m4a,.aac,.ogg,.mp4,.mkv,.mov,.avi,.webm">
+        <div class="row">
+          <button class="primary" id="pickFolder">扫描文件夹</button>
+          <button id="pickFiles">打开文件</button>
+        </div>
+        <input id="search" type="text" placeholder="搜索当前列表">
+        <select id="folderSelect"></select>
+        <div class="folders" id="folderList"></div>
+        <div class="tracks" id="trackList"></div>
+      </div>
+    </aside>
+
+    <main class="panel stage">
+      <section class="brand">
+        <div class="logo" aria-hidden="true"></div>
+        <div>
+          <h1>洞听播放器 Windows 尝鲜版</h1>
+          <div class="subtle" id="nowInfo">先扫描文件夹或打开文件</div>
+        </div>
+      </section>
+      <section class="media-box">
+        <div class="cover" id="cover">树洞里有一只耳朵，正在等你的声音</div>
+        <video id="video" controls hidden></video>
+        <audio id="audio" controls hidden></audio>
+        <div class="lyric" id="caption">暂无歌词 / 字幕</div>
+      </section>
+      <section class="controls">
+        <div class="progress-row">
+          <span id="currentTime">00:00</span>
+          <input id="seek" type="range" min="0" max="1000" value="0">
+          <span id="duration">00:00</span>
+        </div>
+        <div class="row">
+          <button id="prev">上一首</button>
+          <button class="primary" id="playPause">播放/暂停</button>
+          <button id="next">下一首</button>
+          <button id="fullscreen">全屏</button>
+        </div>
+        <div class="row">
+          <button id="back15">快退15秒</button>
+          <button id="forward30">快进30秒</button>
+          <select id="speed"></select>
+          <select id="repeat">
+            <option value="order">顺序播放</option>
+            <option value="one">单曲循环</option>
+            <option value="list">列表循环</option>
+          </select>
+        </div>
+        <div class="row">
+          <button id="setA">设 A 点</button>
+          <button id="setB">设 B 点</button>
+          <button id="clearAb">清 AB</button>
+          <span class="subtle" id="abState">AB 未设置</span>
+        </div>
+        <div class="status-line" id="status">准备就绪</div>
+      </section>
+    </main>
+
+    <aside class="panel">
+      <header>
+        <h2>朗读 / 背景音乐</h2>
+        <span class="subtle">本机浏览器语音</span>
+      </header>
+      <div class="stack">
+        <input id="txtPicker" class="hidden-input" type="file" accept=".txt,.json">
+        <input id="bgPicker" class="hidden-input" type="file" multiple accept="audio/*,.mp3,.flac,.wav,.m4a,.aac,.ogg">
+        <div class="row">
+          <button id="pickTxt">导入文本</button>
+          <button id="readToggle">朗读/暂停</button>
+          <button id="readStop">停止朗读</button>
+        </div>
+        <div class="row">
+          <select id="voiceSelect"></select>
+          <select id="ttsRate">
+            <option value="0.8">慢速</option>
+            <option value="1" selected>正常</option>
+            <option value="1.25">稍快</option>
+            <option value="1.5">快速</option>
+          </select>
+        </div>
+        <div class="reader-text" id="readerText">导入 TXT 或 JSON 后，这里会显示朗读文本。</div>
+        <div class="row">
+          <button id="pickBg">添加背景音乐</button>
+          <button id="bgPlay">背景播放/暂停</button>
+          <button id="bgNext">下一背景</button>
+        </div>
+        <div class="row">
+          <label class="subtle">背景音量</label>
+          <input id="bgVolume" type="range" min="0" max="100" value="25">
+        </div>
+        <div class="bg-list" id="bgList"></div>
+      </div>
+    </aside>
+  </div>
+
+  <script>
+    const audio = document.getElementById('audio');
+    const video = document.getElementById('video');
+    const cover = document.getElementById('cover');
+    const caption = document.getElementById('caption');
+    const trackList = document.getElementById('trackList');
+    const folderList = document.getElementById('folderList');
+    const folderSelect = document.getElementById('folderSelect');
+    const search = document.getElementById('search');
+    const seek = document.getElementById('seek');
+    const speed = document.getElementById('speed');
+    const repeat = document.getElementById('repeat');
+    const statusText = document.getElementById('status');
+    const nowInfo = document.getElementById('nowInfo');
+    const currentTime = document.getElementById('currentTime');
+    const durationText = document.getElementById('duration');
+    const libraryCount = document.getElementById('libraryCount');
+    const readerText = document.getElementById('readerText');
+    const voiceSelect = document.getElementById('voiceSelect');
+    const bgList = document.getElementById('bgList');
+    const bgAudio = new Audio();
+
+    const audioExt = /\.(mp3|flac|wav|m4a|aac|ogg|opus|wma)$/i;
+    const videoExt = /\.(mp4|mkv|mov|avi|webm|m4v|ts|flv|wmv)$/i;
+    const memory = JSON.parse(localStorage.getItem('dongtingWindowsMemory') || '{}');
+    let tracks = [];
+    let folders = [];
+    let currentFolder = '';
+    let currentIndex = -1;
+    let currentUrl = '';
+    let currentKind = 'audio';
+    let ab = { a: null, b: null };
+    let readingText = '';
+    let readingOffset = 0;
+    let readingPaused = true;
+    let bgTracks = [];
+    let bgIndex = 0;
+
+    for (const value of [0.25, 0.5, 0.75, 1, 1.25, 1.5, 2, 3, 4, 6, 8]) {
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = value.toFixed(2) + 'x';
+      if (value === 1) option.selected = true;
+      speed.appendChild(option);
+    }
+
+    function saveMemory() {
+      localStorage.setItem('dongtingWindowsMemory', JSON.stringify(memory));
+    }
+
+    function naturalNumber(name) {
+      const match = String(name).match(/\d+/);
+      return match ? Number(match[0]) : Number.MAX_SAFE_INTEGER;
+    }
+
+    function sortTracks(list) {
+      return [...list].sort((a, b) => {
+        const na = naturalNumber(a.name);
+        const nb = naturalNumber(b.name);
+        if (na !== nb) return na - nb;
+        return a.name.localeCompare(b.name, 'zh-CN', { numeric: true });
+      });
+    }
+
+    function mediaKey(track) {
+      return [track.name, track.size, track.lastModified].join('|');
+    }
+
+    function folderKey(track) {
+      return track.folder || '打开的文件';
+    }
+
+    function kindOf(file) {
+      if (videoExt.test(file.name) || file.type.startsWith('video/')) return 'video';
+      return 'audio';
+    }
+
+    function setStatus(text) {
+      statusText.textContent = text;
+    }
+
+    function formatTime(value) {
+      if (!Number.isFinite(value) || value < 0) value = 0;
+      const total = Math.floor(value);
+      const h = Math.floor(total / 3600);
+      const m = Math.floor((total % 3600) / 60);
+      const s = total % 60;
+      return h ? `${h}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}` : `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    }
+
+    function activePlayer() {
+      return currentKind === 'video' ? video : audio;
+    }
+
+    function buildLibrary(files) {
+      const next = Array.from(files)
+        .filter(file => audioExt.test(file.name) || videoExt.test(file.name) || file.type.startsWith('audio/') || file.type.startsWith('video/'))
+        .map(file => {
+          const relative = file.webkitRelativePath || file.name;
+          const parts = relative.split(/[\\/]/);
+          parts.pop();
+          return {
+            file,
+            name: file.name,
+            folder: parts.join('/') || '打开的文件',
+            size: file.size,
+            lastModified: file.lastModified,
+            kind: kindOf(file)
+          };
+        });
+      tracks = sortTracks(next);
+      folders = [...new Set(tracks.map(folderKey))];
+      currentFolder = folders[0] || '';
+      libraryCount.textContent = tracks.length + ' 个文件';
+      renderFolders();
+      renderTracks();
+      if (tracks.length) {
+        const remembered = memory.lastKey;
+        const index = remembered ? tracks.findIndex(t => mediaKey(t) === remembered) : -1;
+        playAt(index >= 0 ? index : tracks.findIndex(t => folderKey(t) === currentFolder));
+      }
+    }
+
+    function renderFolders() {
+      folderSelect.innerHTML = '';
+      folderList.innerHTML = '';
+      folders.forEach(folder => {
+        const count = tracks.filter(t => folderKey(t) === folder).length;
+        const option = document.createElement('option');
+        option.value = folder;
+        option.textContent = `${folder} (${count})`;
+        folderSelect.appendChild(option);
+
+        const button = document.createElement('button');
+        button.className = 'item' + (folder === currentFolder ? ' active' : '');
+        button.innerHTML = `<span class="name">${folder}</span><span class="subtle">${count} 个媒体</span>`;
+        button.onclick = () => {
+          currentFolder = folder;
+          folderSelect.value = folder;
+          renderFolders();
+          renderTracks();
+        };
+        folderList.appendChild(button);
+      });
+      folderSelect.value = currentFolder;
+    }
+
+    function visibleTracks() {
+      const q = search.value.trim().toLowerCase();
+      return tracks.filter(t => folderKey(t) === currentFolder && (!q || t.name.toLowerCase().includes(q)));
+    }
+
+    function renderTracks() {
+      trackList.innerHTML = '';
+      visibleTracks().forEach(track => {
+        const index = tracks.indexOf(track);
+        const button = document.createElement('button');
+        button.className = 'item' + (index === currentIndex ? ' active' : '');
+        button.innerHTML = `<span class="name">${track.name}</span><span class="subtle">${track.kind === 'video' ? '视频' : '音频'} · ${folderKey(track)}</span>`;
+        button.onclick = () => playAt(index);
+        trackList.appendChild(button);
+      });
+    }
+
+    function applyFolderSpeed(track) {
+      const key = `speed:${folderKey(track)}:${track.kind}`;
+      const remembered = memory[key] || 1;
+      speed.value = String(remembered);
+      audio.playbackRate = remembered;
+      video.playbackRate = remembered;
+    }
+
+    function playAt(index) {
+      if (index < 0 || index >= tracks.length) return;
+      saveCurrentPosition();
+      currentIndex = index;
+      const track = tracks[index];
+      currentKind = track.kind;
+      currentFolder = folderKey(track);
+      if (currentUrl) URL.revokeObjectURL(currentUrl);
+      currentUrl = URL.createObjectURL(track.file);
+      audio.pause();
+      video.pause();
+      audio.hidden = currentKind !== 'audio';
+      video.hidden = currentKind !== 'video';
+      cover.hidden = currentKind === 'video';
+      const player = activePlayer();
+      player.src = currentUrl;
+      player.load();
+      applyFolderSpeed(track);
+      const pos = memory[`pos:${mediaKey(track)}`] || 0;
+      player.onloadedmetadata = () => {
+        if (pos > 3 && pos < player.duration - 3) player.currentTime = pos;
+        player.play().catch(() => setStatus('浏览器拦截了自动播放，请点播放按钮'));
+      };
+      nowInfo.textContent = `${track.name} · ${folderKey(track)}`;
+      memory.lastKey = mediaKey(track);
+      saveMemory();
+      ab = memory[`ab:${mediaKey(track)}`] || { a: null, b: null };
+      updateAbState();
+      renderFolders();
+      renderTracks();
+      setStatus('正在播放：' + track.name);
+    }
+
+    function saveCurrentPosition() {
+      if (currentIndex < 0) return;
+      const track = tracks[currentIndex];
+      const player = activePlayer();
+      if (Number.isFinite(player.currentTime)) memory[`pos:${mediaKey(track)}`] = player.currentTime;
+      memory.lastKey = mediaKey(track);
+      saveMemory();
+    }
+
+    function jump(delta) {
+      const player = activePlayer();
+      player.currentTime = Math.max(0, Math.min(player.duration || 0, player.currentTime + delta));
+      saveCurrentPosition();
+    }
+
+    function nextTrack(step = 1) {
+      const list = visibleTracks();
+      if (!list.length) return;
+      const current = tracks[currentIndex];
+      let local = list.indexOf(current);
+      if (local < 0) local = 0;
+      let next = local + step;
+      if (next >= list.length) {
+        if (repeat.value !== 'list') return;
+        next = 0;
+      }
+      if (next < 0) next = repeat.value === 'list' ? list.length - 1 : 0;
+      playAt(tracks.indexOf(list[next]));
+    }
+
+    function updateAbState() {
+      document.getElementById('abState').textContent = ab.a == null
+        ? 'AB 未设置'
+        : `A ${formatTime(ab.a)}${ab.b == null ? '' : ' / B ' + formatTime(ab.b)}`;
+    }
+
+    function tick() {
+      const player = activePlayer();
+      if (!player.paused && currentIndex >= 0) saveCurrentPosition();
+      const dur = player.duration || 0;
+      currentTime.textContent = formatTime(player.currentTime || 0);
+      durationText.textContent = formatTime(dur);
+      if (dur && !seek.matches(':active')) seek.value = Math.floor((player.currentTime / dur) * 1000);
+      if (ab.a != null && ab.b != null && player.currentTime >= ab.b) player.currentTime = ab.a;
+      requestAnimationFrame(tick);
+    }
+    requestAnimationFrame(tick);
+
+    function onEnded() {
+      if (repeat.value === 'one') {
+        const player = activePlayer();
+        player.currentTime = 0;
+        player.play();
+      } else {
+        nextTrack(1);
+      }
+    }
+    audio.onended = onEnded;
+    video.onended = onEnded;
+
+    document.getElementById('pickFolder').onclick = () => document.getElementById('folderPicker').click();
+    document.getElementById('pickFiles').onclick = () => document.getElementById('filePicker').click();
+    document.getElementById('folderPicker').onchange = e => buildLibrary(e.target.files);
+    document.getElementById('filePicker').onchange = e => buildLibrary(e.target.files);
+    folderSelect.onchange = () => {
+      currentFolder = folderSelect.value;
+      renderFolders();
+      renderTracks();
+    };
+    search.oninput = renderTracks;
+    document.getElementById('playPause').onclick = () => {
+      const player = activePlayer();
+      if (player.paused) player.play(); else player.pause();
+    };
+    document.getElementById('prev').onclick = () => nextTrack(-1);
+    document.getElementById('next').onclick = () => nextTrack(1);
+    document.getElementById('back15').onclick = () => jump(-15);
+    document.getElementById('forward30').onclick = () => jump(30);
+    document.getElementById('fullscreen').onclick = () => {
+      const player = activePlayer();
+      if (player.requestFullscreen) player.requestFullscreen();
+    };
+    seek.onchange = () => {
+      const player = activePlayer();
+      if (player.duration) player.currentTime = (Number(seek.value) / 1000) * player.duration;
+    };
+    speed.onchange = () => {
+      const value = Number(speed.value);
+      audio.playbackRate = value;
+      video.playbackRate = value;
+      if (currentIndex >= 0) memory[`speed:${currentFolder}:${currentKind}`] = value;
+      saveMemory();
+    };
+    repeat.onchange = () => {
+      memory.repeat = repeat.value;
+      saveMemory();
+    };
+    repeat.value = memory.repeat || 'order';
+    document.getElementById('setA').onclick = () => {
+      ab.a = activePlayer().currentTime || 0;
+      if (ab.b != null && ab.b <= ab.a) ab.b = null;
+      if (currentIndex >= 0) memory[`ab:${mediaKey(tracks[currentIndex])}`] = ab;
+      saveMemory();
+      updateAbState();
+    };
+    document.getElementById('setB').onclick = () => {
+      if (ab.a == null) ab.a = 0;
+      ab.b = Math.max(ab.a + 1, activePlayer().currentTime || 0);
+      if (currentIndex >= 0) memory[`ab:${mediaKey(tracks[currentIndex])}`] = ab;
+      saveMemory();
+      updateAbState();
+    };
+    document.getElementById('clearAb').onclick = () => {
+      ab = { a: null, b: null };
+      if (currentIndex >= 0) delete memory[`ab:${mediaKey(tracks[currentIndex])}`];
+      saveMemory();
+      updateAbState();
+    };
+
+    function loadVoices() {
+      const voices = speechSynthesis.getVoices();
+      voiceSelect.innerHTML = '';
+      voices.forEach((voice, index) => {
+        const option = document.createElement('option');
+        option.value = index;
+        option.textContent = `${voice.name} · ${voice.lang}`;
+        voiceSelect.appendChild(option);
+      });
+    }
+    loadVoices();
+    speechSynthesis.onvoiceschanged = loadVoices;
+
+    document.getElementById('pickTxt').onclick = () => document.getElementById('txtPicker').click();
+    document.getElementById('txtPicker').onchange = async e => {
+      const file = e.target.files[0];
+      if (!file) return;
+      const raw = await file.text();
+      readingText = file.name.toLowerCase().endsWith('.json') ? jsonToReadable(raw) : raw;
+      readingOffset = Number(memory[`read:${file.name}:${file.size}`] || 0);
+      showReadingText();
+      setStatus('已导入文本：' + file.name);
+    };
+
+    function jsonToReadable(raw) {
+      try {
+        const value = JSON.parse(raw);
+        const lines = [];
+        const walk = data => {
+          if (Array.isArray(data)) data.forEach(walk);
+          else if (data && typeof data === 'object') Object.values(data).forEach(walk);
+          else if (data != null && String(data).trim()) lines.push(String(data).trim());
+        };
+        walk(value);
+        return lines.join('\n');
+      } catch {
+        return raw;
+      }
+    }
+
+    function showReadingText(highlightLength = 0) {
+      if (!readingText) {
+        readerText.textContent = '导入 TXT 或 JSON 后，这里会显示朗读文本。';
+        return;
+      }
+      const start = Math.max(0, readingOffset - 160);
+      const end = Math.min(readingText.length, readingOffset + 520);
+      const before = escapeHtml(readingText.slice(start, readingOffset));
+      const current = escapeHtml(readingText.slice(readingOffset, readingOffset + highlightLength));
+      const after = escapeHtml(readingText.slice(readingOffset + highlightLength, end));
+      readerText.innerHTML = before + (current ? `<mark>${current}</mark>` : '') + after;
+      readerText.scrollTop = readerText.scrollHeight / 3;
+    }
+
+    function escapeHtml(text) {
+      return text.replace(/[&<>"']/g, ch => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+    }
+
+    function speakNext() {
+      if (!readingText || readingOffset >= readingText.length) {
+        readingPaused = true;
+        return;
+      }
+      const text = readingText.slice(readingOffset, readingOffset + 420);
+      const sentenceEnd = text.search(/[。！？!?；;\n]/);
+      const chunk = text.slice(0, sentenceEnd > 40 ? sentenceEnd + 1 : Math.min(text.length, 420));
+      const utterance = new SpeechSynthesisUtterance(chunk);
+      const voices = speechSynthesis.getVoices();
+      if (voices[voiceSelect.value]) utterance.voice = voices[voiceSelect.value];
+      utterance.rate = Number(document.getElementById('ttsRate').value || 1);
+      utterance.onboundary = event => {
+        if (typeof event.charIndex === 'number') showReadingText(Math.max(1, event.charLength || 1));
+      };
+      utterance.onend = () => {
+        readingOffset += chunk.length;
+        memory.lastReadingOffset = readingOffset;
+        saveMemory();
+        showReadingText();
+        if (!readingPaused) speakNext();
+      };
+      speechSynthesis.speak(utterance);
+    }
+
+    document.getElementById('readToggle').onclick = () => {
+      if (!readingText) return;
+      if (!readingPaused) {
+        readingPaused = true;
+        speechSynthesis.cancel();
+      } else {
+        readingPaused = false;
+        speakNext();
+      }
+    };
+    document.getElementById('readStop').onclick = () => {
+      readingPaused = true;
+      speechSynthesis.cancel();
+      readingOffset = 0;
+      showReadingText();
+    };
+
+    document.getElementById('pickBg').onclick = () => document.getElementById('bgPicker').click();
+    document.getElementById('bgPicker').onchange = e => {
+      bgTracks = Array.from(e.target.files).map(file => ({ file, name: file.name, url: URL.createObjectURL(file) }));
+      bgIndex = 0;
+      renderBg();
+      if (bgTracks.length) playBg(0);
+    };
+    document.getElementById('bgPlay').onclick = () => {
+      if (!bgTracks.length) return;
+      if (bgAudio.paused) bgAudio.play(); else bgAudio.pause();
+    };
+    document.getElementById('bgNext').onclick = () => playBg((bgIndex + 1) % Math.max(1, bgTracks.length));
+    document.getElementById('bgVolume').oninput = e => {
+      bgAudio.volume = Number(e.target.value) / 100;
+      memory.bgVolume = e.target.value;
+      saveMemory();
+    };
+    document.getElementById('bgVolume').value = memory.bgVolume || 25;
+    bgAudio.volume = Number(document.getElementById('bgVolume').value) / 100;
+    bgAudio.onended = () => playBg((bgIndex + 1) % Math.max(1, bgTracks.length));
+
+    function playBg(index) {
+      if (!bgTracks.length) return;
+      bgIndex = index;
+      bgAudio.src = bgTracks[bgIndex].url;
+      bgAudio.play();
+      renderBg();
+    }
+
+    function renderBg() {
+      bgList.innerHTML = '';
+      bgTracks.forEach((track, index) => {
+        const button = document.createElement('button');
+        button.className = 'item' + (index === bgIndex ? ' active' : '');
+        button.innerHTML = `<span class="name">${track.name}</span><span class="subtle">背景音乐</span>`;
+        button.onclick = () => playBg(index);
+        bgList.appendChild(button);
+      });
+    }
+
+    window.addEventListener('beforeunload', saveCurrentPosition);
+  </script>
+</body>
+</html>
