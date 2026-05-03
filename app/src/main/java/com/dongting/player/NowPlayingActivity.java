@@ -517,8 +517,9 @@ public class NowPlayingActivity extends AppCompatActivity {
         List<String> chunks = splitTextForTts(text);
         if (chunks.isEmpty()) return "";
         int index = Math.max(0, Math.min(prefs.getInt("ttsChunk:" + uri, 0), chunks.size() - 1));
-        int start = prefs.getInt("ttsRangeStart:" + uri, -1);
-        int end = prefs.getInt("ttsRangeEnd:" + uri, -1);
+        boolean chunkMode = "chunk".equals(prefs.getString("ttsVisualMode:" + uri, ""));
+        int start = chunkMode ? -1 : prefs.getInt("ttsRangeStart:" + uri, -1);
+        int end = chunkMode ? -1 : prefs.getInt("ttsRangeEnd:" + uri, -1);
         return readingWindowText(chunks, index, start, end);
     }
 

@@ -4,12 +4,15 @@ import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.Settings;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
 import android.widget.Button;
 import android.widget.CheckBox;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.SeekBar;
@@ -18,6 +21,11 @@ import android.widget.Toast;
 
 import androidx.annotation.Nullable;
 import androidx.appcompat.app.AppCompatActivity;
+
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URLEncoder;
+import java.net.URL;
 
 public class SettingsActivity extends AppCompatActivity {
     private static final String PREFS = "dongting_player";
@@ -81,6 +89,28 @@ public class SettingsActivity extends AppCompatActivity {
                     notifyBackgroundVolumeIfNeeded("bgVolume");
                     toast("朗读设置已恢复默认");
                 }),
+                btn("清除洞听人声绑定", v -> {
+                    prefs.edit().remove("ttsVoice").apply();
+                    toast("已清除人声绑定，朗读将使用系统默认 TTS 引擎");
+                }),
+                btn("使用系统TTS", v -> {
+                    prefs.edit().putString("ttsProvider", "system").apply();
+                    stopService(new Intent(this, TextReaderService.class));
+                    toast("已切换为系统 TTS，现有朗读功能保持不变");
+                }),
+                btn("使用MultiTTS接口", v -> {
+                    prefs.edit()
+                            .putString("ttsProvider", "multitts")
+                            .putString("externalTtsForwardUrl", prefs.getString("externalTtsForwardUrl", "http://127.0.0.1:8774/forward"))
+                            .apply();
+                    stopService(new Intent(this, TextReaderService.class));
+                    toast("已切换为 MultiTTS 接口，下次朗读会使用 MultiTTS");
+                }),
+                btn("设置MultiTTS音色ID", v -> showExternalTtsVoiceDialog()),
+                btn("设置MultiTTS地址", v -> showExternalTtsUrlDialog()),
+                btn("打开MultiTTS", v -> openMultiTtsApp()),
+                btn("测试MultiTTS接口", v -> testExternalTtsEndpoint()),
+                slider("MultiTTS音量", "externalTtsVolume", 100, 100),
                 btn("停止后台朗读", v -> {
                     stopService(new Intent(this, TextReaderService.class));
                     toast("已停止后台朗读");
@@ -176,6 +206,133 @@ public class SettingsActivity extends AppCompatActivity {
                 })
                 .setNegativeButton("取消", null)
                 .show();
+    }
+
+    private void showExternalTtsVoiceDialog() {
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setText(prefs.getString("externalTtsVoice", ""));
+        input.setHint("例如 MultiTTS voices 接口里的 voice id，可留空");
+        input.setTextColor(COLOR_TEXT);
+        input.setHintTextColor(COLOR_SUBTLE);
+        input.setBackgroundColor(COLOR_PANEL);
+        new AlertDialog.Builder(this)
+                .setTitle("MultiTTS 音色 ID")
+                .setMessage("如果 MultiTTS 的 /voices 能看到 voiceCode 或 voice id，可填在这里。留空则使用 MultiTTS 当前默认音色。")
+                .setView(input)
+                .setPositiveButton("保存", (dialog, which) -> {
+                    String value = input.getText() == null ? "" : input.getText().toString().trim();
+                    SharedPreferences.Editor editor = prefs.edit();
+                    if (value.isEmpty()) editor.remove("externalTtsVoice"); else editor.putString("externalTtsVoice", value);
+                    editor.apply();
+                    toast(value.isEmpty() ? "已使用 MultiTTS 默认音色" : "已保存 MultiTTS 音色：" + value);
+                })
+                .setNeutralButton("清空", (dialog, which) -> {
+                    prefs.edit().remove("externalTtsVoice").apply();
+                    toast("已清空 MultiTTS 音色 ID");
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void showExternalTtsUrlDialog() {
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setText(prefs.getString("externalTtsForwardUrl", "http://127.0.0.1:8774/forward"));
+        input.setHint("http://127.0.0.1:8774/forward");
+        input.setTextColor(COLOR_TEXT);
+        input.setHintTextColor(COLOR_SUBTLE);
+        input.setBackgroundColor(COLOR_PANEL);
+        new AlertDialog.Builder(this)
+                .setTitle("MultiTTS 转发地址")
+                .setMessage("如果 MultiTTS 实际端口不是 8774，可在这里改。必须包含 /forward。")
+                .setView(input)
+                .setPositiveButton("保存", (dialog, which) -> {
+                    String value = input.getText() == null ? "" : input.getText().toString().trim();
+                    if (value.isEmpty()) value = "http://127.0.0.1:8774/forward";
+                    prefs.edit().putString("externalTtsForwardUrl", value).apply();
+                    toast("已保存 MultiTTS 地址");
+                })
+                .setNeutralButton("恢复默认", (dialog, which) -> {
+                    prefs.edit().putString("externalTtsForwardUrl", "http://127.0.0.1:8774/forward").apply();
+                    toast("已恢复默认地址");
+                })
+                .setNegativeButton("取消", null)
+                .show();
+    }
+
+    private void openMultiTtsApp() {
+        Intent intent = getPackageManager().getLaunchIntentForPackage("org.nobody.multitts");
+        if (intent == null) {
+            toast("未找到 MultiTTS：org.nobody.multitts");
+            return;
+        }
+        startActivity(intent);
+    }
+
+    private void testExternalTtsEndpoint() {
+        toast("正在测试 MultiTTS 接口");
+        new Thread(() -> {
+            String result = runExternalTtsTest();
+            new Handler(Looper.getMainLooper()).post(() -> new AlertDialog.Builder(this)
+                    .setTitle("MultiTTS 接口测试")
+                    .setMessage(result)
+                    .setPositiveButton("确定", null)
+                    .show());
+        }).start();
+    }
+
+    private String runExternalTtsTest() {
+        String forward = prefs.getString("externalTtsForwardUrl", "http://127.0.0.1:8774/forward");
+        if (forward == null || forward.trim().isEmpty()) forward = "http://127.0.0.1:8774/forward";
+        String voices = forward.replace("/forward", "/voices");
+        StringBuilder message = new StringBuilder();
+        message.append("提供方：").append(prefs.getString("ttsProvider", "system")).append('\n');
+        message.append("forward：").append(forward).append('\n');
+        message.append("voice：").append(prefs.getString("externalTtsVoice", "默认")).append('\n');
+        message.append("上次状态：").append(prefs.getString("lastExternalTtsState", "无")).append('\n');
+        message.append("上次错误：").append(prefs.getString("lastExternalTtsError", "无")).append('\n');
+        message.append("上次信息：").append(prefs.getString("lastExternalTtsInfo", "无")).append("\n\n");
+        message.append("voices：").append(testHttp(voices, false)).append("\n\n");
+        try {
+            String separator = forward.contains("?") ? "&" : "?";
+            String url = forward + separator
+                    + "text=" + URLEncoder.encode("洞听 MultiTTS 接口测试。", "UTF-8")
+                    + "&speed=50&volume=100&pitch=50";
+            String voice = prefs.getString("externalTtsVoice", "");
+            if (!voice.trim().isEmpty()) url += "&voice=" + URLEncoder.encode(voice.trim(), "UTF-8");
+            message.append("forward测试：").append(testHttp(url, true));
+        } catch (Exception ex) {
+            message.append("forward测试异常：").append(ex.getClass().getSimpleName()).append(": ").append(ex.getMessage());
+        }
+        return message.toString();
+    }
+
+    private String testHttp(String rawUrl, boolean binary) {
+        HttpURLConnection connection = null;
+        try {
+            connection = (HttpURLConnection) new URL(rawUrl).openConnection();
+            connection.setConnectTimeout(2500);
+            connection.setReadTimeout(6000);
+            connection.setRequestMethod("GET");
+            int code = connection.getResponseCode();
+            String type = connection.getContentType();
+            InputStream input = code >= 400 ? connection.getErrorStream() : connection.getInputStream();
+            int total = 0;
+            StringBuilder preview = new StringBuilder();
+            byte[] buffer = new byte[1024];
+            int read;
+            while (input != null && (read = input.read(buffer)) != -1 && total < 8192) {
+                if (!binary && preview.length() < 600) preview.append(new String(buffer, 0, read));
+                total += read;
+            }
+            return "HTTP " + code + "，类型 " + type + "，读取 " + total + " 字节"
+                    + (preview.length() > 0 ? "\n" + preview : "");
+        } catch (Exception ex) {
+            return ex.getClass().getSimpleName() + ": " + ex.getMessage();
+        } finally {
+            if (connection != null) connection.disconnect();
+        }
     }
 
     private void confirmResetAllDefaults() {

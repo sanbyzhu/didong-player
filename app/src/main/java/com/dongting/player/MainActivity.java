@@ -249,21 +249,21 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private final ActivityResultLauncher<Intent> textPicker =
             registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+                if (result.getResultCode() == RESULT_OK && result.getData() != null) {
+                    importPickedTexts(result.getData());
+                }
+            });
+
+    private final ActivityResultLauncher<Intent> textFolderPicker =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
                 if (result.getResultCode() == RESULT_OK && result.getData() != null && result.getData().getData() != null) {
                     Uri uri = result.getData().getData();
-                    int flags = result.getData().getFlags() & (Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_WRITE_URI_PERMISSION);
+                    int flags = result.getData().getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION;
                     try {
                         getContentResolver().takePersistableUriPermission(uri, flags);
                     } catch (SecurityException ignored) {
                     }
-                    importedText = readText(uri);
-                    importedTextKey = uri.toString();
-                    currentTextChunk = prefs.getInt("ttsChunk:" + importedTextKey, 0);
-                    textChunks.clear();
-                    rememberTextBook(uri, displayName(uri));
-                    prefs.edit().putString("lastTextUri", importedTextKey).apply();
-                    status("已导入文本：" + importedText.length() + " 字，进度已恢复到第 " + (currentTextChunk + 1) + " 段");
-                    updateVisualStage();
+                    importTextFolder(uri);
                 }
             });
 
@@ -363,7 +363,25 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         restoreImportedText();
         requestNotificationPermission();
         loadPlaylists();
-        tts = new TextToSpeech(this, this);
+        createTtsFromSystemDefault();
+    }
+
+    private void createTtsFromSystemDefault() {
+        String engine = currentSystemTtsEngine();
+        if (engine.isEmpty()) {
+            tts = new TextToSpeech(this, this);
+        } else {
+            tts = new TextToSpeech(this, this, engine);
+        }
+    }
+
+    private String currentSystemTtsEngine() {
+        try {
+            String engine = Settings.Secure.getString(getContentResolver(), "tts_default_synth");
+            return engine == null ? "" : engine.trim();
+        } catch (Exception ignored) {
+            return "";
+        }
     }
 
     @Override
@@ -776,9 +794,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
         controls.addView(row(
                 btn("导入TXT", v -> pickText()),
+                btn("TXT文件夹", v -> pickTextFolder()),
                 btn("朗读/暂停", v -> speakText()),
                 btn("朗读分段", v -> showTextChunksDialog()),
-                btn("男声优先", v -> preferMaleVoice())
+                btn("默认TTS", v -> useSystemDefaultTts())
         ));
         controls.addView(row(
                 btn("TXT书架", v -> showTextBookshelf()),
@@ -787,7 +806,6 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 btn("数据备份", v -> showBackupDialog())
         ));
         controls.addView(row(
-                btn("背景音乐", v -> showBackgroundMusicDialog()),
                 btn("视频全屏", v -> enterVideoFullScreen()),
                 btn("系统TTS", v -> openTtsSettings()),
                 btn("停止朗读", v -> stopSpeaking())
@@ -2276,8 +2294,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         int index = currentTextChunk;
         if (!importedTextKey.isEmpty()) index = prefs.getInt("ttsChunk:" + importedTextKey, currentTextChunk);
         index = Math.max(0, Math.min(index, textChunks.size() - 1));
-        int start = importedTextKey.isEmpty() ? -1 : prefs.getInt("ttsRangeStart:" + importedTextKey, -1);
-        int end = importedTextKey.isEmpty() ? -1 : prefs.getInt("ttsRangeEnd:" + importedTextKey, -1);
+        boolean chunkMode = !importedTextKey.isEmpty() && "chunk".equals(prefs.getString("ttsVisualMode:" + importedTextKey, ""));
+        int start = chunkMode || importedTextKey.isEmpty() ? -1 : prefs.getInt("ttsRangeStart:" + importedTextKey, -1);
+        int end = chunkMode || importedTextKey.isEmpty() ? -1 : prefs.getInt("ttsRangeEnd:" + importedTextKey, -1);
         return readingWindowText(textChunks, index, start, end);
     }
 
@@ -3313,6 +3332,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private void refreshVoices() {
         voices.clear();
         List<String> names = new ArrayList<>();
+        names.add("使用系统默认 TTS 引擎/音色（推荐）");
         Set<Voice> available = tts.getVoices();
         if (available != null) {
             for (Voice voice : available) {
@@ -3323,22 +3343,23 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 }
             }
         }
-        if (names.isEmpty()) names.add("系统默认人声");
         ArrayAdapter<String> adapter = new ArrayAdapter<>(this, android.R.layout.simple_spinner_dropdown_item, names);
         voiceSpinner.setAdapter(adapter);
         String savedVoice = prefs.getString("ttsVoice", "");
         int selected = 0;
         for (int i = 0; i < voices.size(); i++) {
             if (voices.get(i).getName().equals(savedVoice)) {
-                selected = i;
+                selected = i + 1;
                 break;
             }
         }
-        if (!voices.isEmpty()) voiceSpinner.setSelection(selected);
+        voiceSpinner.setSelection(selected);
         voiceSpinner.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
             @Override public void onItemSelected(AdapterView<?> parent, View view, int position, long id) {
-                if (position >= 0 && position < voices.size()) {
-                    prefs.edit().putString("ttsVoice", voices.get(position).getName()).apply();
+                if (position <= 0) {
+                    prefs.edit().remove("ttsVoice").apply();
+                } else if (position - 1 < voices.size()) {
+                    prefs.edit().putString("ttsVoice", voices.get(position - 1).getName()).apply();
                 }
             }
             @Override public void onNothingSelected(AdapterView<?> parent) { }
@@ -3359,13 +3380,25 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             }
         }
         if (found >= 0) {
-            voiceSpinner.setSelection(found);
+            voiceSpinner.setSelection(found + 1);
             prefs.edit().putString("ttsVoice", voices.get(found).getName()).apply();
             if (tts != null) tts.setVoice(voices.get(found));
             status("已切换到疑似男声：" + voices.get(found).getName());
         } else {
             status("系统 TTS 没标出男声，可在“系统TTS”里安装/选择更多语音包");
         }
+    }
+
+    private void useSystemDefaultTts() {
+        prefs.edit().remove("ttsVoice").apply();
+        if (voiceSpinner != null) voiceSpinner.setSelection(0);
+        if (tts != null) {
+            tts.stop();
+            tts.shutdown();
+            tts = null;
+        }
+        createTtsFromSystemDefault();
+        status("已清除洞听内保存的人声绑定，正在重新连接系统默认 TTS：" + currentSystemTtsEngine());
     }
 
     private void openTtsSettings() {
@@ -3385,13 +3418,110 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("*/*");
         intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"text/*", "application/json", "application/epub+zip", "application/octet-stream"});
+        intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         textPicker.launch(intent);
+    }
+
+    private void pickTextFolder() {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        textFolderPicker.launch(intent);
+    }
+
+    private void importPickedTexts(Intent data) {
+        List<Uri> uris = new ArrayList<>();
+        if (data.getClipData() != null) {
+            for (int i = 0; i < data.getClipData().getItemCount(); i++) {
+                Uri uri = data.getClipData().getItemAt(i).getUri();
+                if (uri != null) uris.add(uri);
+            }
+        } else if (data.getData() != null) {
+            uris.add(data.getData());
+        }
+        int flags = data.getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION;
+        int added = 0;
+        Uri first = null;
+        for (Uri uri : uris) {
+            if (!isTextLikeUri(uri)) continue;
+            try {
+                getContentResolver().takePersistableUriPermission(uri, flags);
+            } catch (SecurityException ignored) {
+            }
+            rememberTextBook(uri, displayName(uri));
+            if (first == null) first = uri;
+            added++;
+        }
+        if (first != null) openTextUri(first, "已导入文本 " + added + " 本，当前打开：");
+        else status("没有找到可导入的 TXT/JSON/EPUB 文本");
+    }
+
+    private void importTextFolder(Uri folderUri) {
+        DocumentFile root = DocumentFile.fromTreeUri(this, folderUri);
+        if (root == null || !root.exists()) {
+            status("无法读取 TXT 文件夹");
+            return;
+        }
+        List<DocumentFile> files = new ArrayList<>();
+        collectTextFiles(root, files);
+        files.sort((a, b) -> MediaUtils.compareTitle(a.getName() == null ? "" : a.getName(), b.getName() == null ? "" : b.getName(), collator));
+        Uri first = null;
+        int added = 0;
+        for (DocumentFile file : files) {
+            Uri uri = file.getUri();
+            rememberTextBook(uri, file.getName());
+            if (first == null) first = uri;
+            added++;
+        }
+        if (first != null) openTextUri(first, "已从文件夹导入文本 " + added + " 本，当前打开：");
+        else status("这个文件夹里没有找到 TXT/JSON/EPUB 文本");
+    }
+
+    private void collectTextFiles(DocumentFile dir, List<DocumentFile> out) {
+        for (DocumentFile file : dir.listFiles()) {
+            if (file.isDirectory()) {
+                collectTextFiles(file, out);
+            } else if (isTextLikeName(file.getName())) {
+                out.add(file);
+            }
+        }
+    }
+
+    private boolean isTextLikeUri(Uri uri) {
+        String mime = getContentResolver().getType(uri);
+        return mime != null && (mime.startsWith("text/") || "application/json".equals(mime) || "application/epub+zip".equals(mime))
+                || isTextLikeName(displayName(uri));
+    }
+
+    private boolean isTextLikeName(String name) {
+        String value = name == null ? "" : name.toLowerCase(Locale.ROOT);
+        return value.endsWith(".txt") || value.endsWith(".json") || value.endsWith(".epub");
+    }
+
+    private void openTextUri(Uri uri, String prefix) {
+        importedText = readText(uri);
+        importedTextKey = uri.toString();
+        currentTextChunk = prefs.getInt("ttsChunk:" + importedTextKey, 0);
+        textChunks.clear();
+        prefs.edit().putString("lastTextUri", importedTextKey).apply();
+        status(prefix + displayName(uri));
+        updateVisualStage();
     }
 
     private void speakText() {
         if (importedText.trim().isEmpty()) {
             status("请先导入 txt 文本");
+            return;
+        }
+        if (useExternalTtsProvider()) {
+            if (TextReaderService.isRunning()) {
+                boolean wasPaused = TextReaderService.isPaused();
+                startTextReaderService(TextReaderService.ACTION_TOGGLE, null);
+                status(wasPaused ? "继续 MultiTTS 朗读" : "已暂停 MultiTTS 朗读");
+            } else {
+                startTextReaderService(TextReaderService.ACTION_START, importedTextKey.isEmpty() ? null : importedTextKey);
+                status("已开始 MultiTTS 朗读，若接口失败会退回系统 TTS");
+            }
             return;
         }
         if (!importedTextKey.isEmpty()) {
@@ -3411,7 +3541,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             return;
         }
         int selected = voiceSpinner.getSelectedItemPosition();
-        if (selected >= 0 && selected < voices.size()) tts.setVoice(voices.get(selected));
+        if (selected > 0 && selected - 1 < voices.size()) tts.setVoice(voices.get(selected - 1));
         applyTtsSettings();
         textChunks.clear();
         textChunks.addAll(splitTextForTts(importedText));
@@ -3427,11 +3557,18 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private void startTextReaderService(String action, @Nullable String textUri) {
         Intent service = new Intent(this, TextReaderService.class).setAction(action);
         if (textUri != null) service.putExtra(TextReaderService.EXTRA_TEXT_URI, textUri);
+        if (TextReaderService.ACTION_START.equals(action) && (textUri == null || textUri.isEmpty()) && !importedText.trim().isEmpty()) {
+            service.putExtra(TextReaderService.EXTRA_TEXT_CONTENT, importedText);
+        }
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && TextReaderService.ACTION_START.equals(action)) {
             startForegroundService(service);
         } else {
             startService(service);
         }
+    }
+
+    private boolean useExternalTtsProvider() {
+        return "multitts".equals(prefs.getString("ttsProvider", "system"));
     }
 
     private void speakNextTextChunk() {
@@ -3525,13 +3662,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void openTextBook(NamedUri book) {
-        importedTextKey = book.uri;
-        importedText = readText(Uri.parse(book.uri));
-        currentTextChunk = prefs.getInt("ttsChunk:" + importedTextKey, 0);
-        textChunks.clear();
-        prefs.edit().putString("lastTextUri", importedTextKey).apply();
+        openTextUri(Uri.parse(book.uri), "已打开书架文本：");
         status("已打开书架文本：" + book.name);
-        updateVisualStage();
     }
 
     private void rememberTextBook(Uri uri, String name) {
@@ -3817,6 +3949,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         message.append("画中画：").append(Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ? "系统支持" : "系统不支持").append('\n');
         message.append("TTS：").append(tts == null ? "初始化中" : "已初始化").append('\n');
         message.append("TTS字词高亮：").append(TextReaderService.isRangeTrackingSupported() ? "已收到系统回调" : "等待系统支持/开始朗读后检测").append('\n');
+        message.append("TTS提供方：").append(prefs.getString("ttsProvider", "system")).append('\n');
+        message.append("MultiTTS状态：").append(prefs.getString("lastExternalTtsState", "无")).append('\n');
+        message.append("MultiTTS错误：").append(prefs.getString("lastExternalTtsError", "无")).append('\n');
+        message.append("MultiTTS信息：").append(prefs.getString("lastExternalTtsInfo", "无")).append('\n');
         message.append("数据库镜像：").append(database == null ? "未连接" : "已启用");
         new AlertDialog.Builder(this)
                 .setTitle("设备体验自检")
@@ -4332,39 +4468,116 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private void importBackup(Uri uri) {
         try {
-            JSONObject root = new JSONObject(readRawText(uri));
-            JSONObject prefObj = root.optJSONObject("prefs");
-            if (prefObj != null) {
-                SharedPreferences.Editor editor = prefs.edit();
-                JSONArray names = prefObj.names();
-                if (names != null) {
-                    for (int i = 0; i < names.length(); i++) {
-                        String key = names.getString(i);
-                        Object value = prefObj.get(key);
-                        if (value instanceof Boolean) editor.putBoolean(key, (Boolean) value);
-                        else if (value instanceof Integer) editor.putInt(key, (Integer) value);
-                        else if (value instanceof Long) editor.putLong(key, (Long) value);
-                        else if (value instanceof Double) editor.putFloat(key, ((Double) value).floatValue());
-                        else editor.putString(key, String.valueOf(value));
-                    }
-                }
-                editor.apply();
-            }
-            JSONObject dbObj = root.optJSONObject("db");
-            if (dbObj != null) {
-                JSONArray names = dbObj.names();
-                if (names != null) {
-                    for (int i = 0; i < names.length(); i++) {
-                        String key = names.getString(i);
-                        dbPut(key, dbObj.optString(key, ""));
-                    }
-                }
+            String raw = readBackupText(uri);
+            JSONObject root = new JSONObject(cleanJsonText(raw));
+            JSONObject prefObj = firstObject(root, "prefs", "preferences", "sharedPreferences", "settings");
+            JSONObject dbObj = firstObject(root, "db", "database", "mirror");
+            if (prefObj == null && looksLikeLegacyPrefs(root)) prefObj = root;
+            if (prefObj == null) prefObj = root.optJSONObject("data");
+            int prefCount = importPrefsObject(prefObj);
+            int dbCount = importDbObject(dbObj);
+            if (prefCount == 0 && dbCount == 0) {
+                status("导入备份失败：没有找到可恢复的数据");
+                return;
             }
             loadPlaylists();
-            status("备份已导入，播放列表和记忆已刷新");
+            restoreImportedText();
+            status("备份已导入：设置/记忆 " + prefCount + " 项，数据库镜像 " + dbCount + " 项");
         } catch (JSONException ex) {
             status("导入备份失败：文件格式不正确");
+        } catch (Exception ex) {
+            status("导入备份失败：" + ex.getMessage());
         }
+    }
+
+    private String readBackupText(Uri uri) {
+        String raw = readRawText(uri);
+        String trimmed = cleanJsonText(raw);
+        if (trimmed.startsWith("{")) return trimmed;
+        try (InputStream input = getContentResolver().openInputStream(uri);
+             ZipInputStream zip = new ZipInputStream(input)) {
+            ZipEntry entry;
+            byte[] buffer = new byte[4096];
+            while ((entry = zip.getNextEntry()) != null) {
+                String name = entry.getName().toLowerCase(Locale.ROOT);
+                if (entry.isDirectory() || !name.endsWith(".json")) continue;
+                ByteArrayOutputStream output = new ByteArrayOutputStream();
+                int read;
+                while ((read = zip.read(buffer)) != -1) output.write(buffer, 0, read);
+                String text = cleanJsonText(output.toString("UTF-8"));
+                if (text.startsWith("{")) return text;
+            }
+        } catch (Exception ignored) {
+        }
+        return trimmed;
+    }
+
+    private String cleanJsonText(String raw) {
+        String text = raw == null ? "" : raw.trim();
+        if (text.startsWith("\uFEFF")) text = text.substring(1).trim();
+        if (text.startsWith("```")) {
+            int firstLine = text.indexOf('\n');
+            int lastFence = text.lastIndexOf("```");
+            if (firstLine >= 0 && lastFence > firstLine) text = text.substring(firstLine + 1, lastFence).trim();
+        }
+        return text;
+    }
+
+    private JSONObject firstObject(JSONObject root, String... keys) {
+        for (String key : keys) {
+            JSONObject object = root.optJSONObject(key);
+            if (object != null) return object;
+        }
+        return null;
+    }
+
+    private boolean looksLikeLegacyPrefs(JSONObject root) {
+        return root.has("playlists") || root.has("selectedPlaylist") || root.has("currentUri")
+                || root.has("lastTextUri") || root.has("textBooks") || root.has("scanFolders")
+                || root.has("bgPlaylist") || root.has("ttsProvider");
+    }
+
+    private int importPrefsObject(@Nullable JSONObject prefObj) throws JSONException {
+        if (prefObj == null) return 0;
+        SharedPreferences.Editor editor = prefs.edit();
+        JSONArray names = prefObj.names();
+        int count = 0;
+        if (names != null) {
+            for (int i = 0; i < names.length(); i++) {
+                String key = names.getString(i);
+                Object value = prefObj.get(key);
+                if (value == JSONObject.NULL) continue;
+                if (value instanceof Boolean) editor.putBoolean(key, (Boolean) value);
+                else if (value instanceof Integer) editor.putInt(key, (Integer) value);
+                else if (value instanceof Long) editor.putLong(key, (Long) value);
+                else if (value instanceof Float) editor.putFloat(key, (Float) value);
+                else if (value instanceof Double) {
+                    double number = (Double) value;
+                    if (key.startsWith("pos:") || key.endsWith("At") || key.endsWith("Ms")) editor.putLong(key, (long) number);
+                    else editor.putFloat(key, (float) number);
+                } else if (value instanceof Number) editor.putLong(key, ((Number) value).longValue());
+                else editor.putString(key, String.valueOf(value));
+                count++;
+            }
+        }
+        editor.apply();
+        return count;
+    }
+
+    private int importDbObject(@Nullable JSONObject dbObj) throws JSONException {
+        if (dbObj == null) return 0;
+        JSONArray names = dbObj.names();
+        int count = 0;
+        if (names != null) {
+            for (int i = 0; i < names.length(); i++) {
+                String key = names.getString(i);
+                Object value = dbObj.get(key);
+                if (value == JSONObject.NULL) continue;
+                dbPut(key, String.valueOf(value));
+                count++;
+            }
+        }
+        return count;
     }
 
     private void showDataStatsDialog() {

@@ -22,6 +22,8 @@ import androidx.annotation.Nullable;
 import androidx.media3.common.AudioAttributes;
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
+import androidx.media3.common.PlaybackException;
+import androidx.media3.common.Player;
 import androidx.media3.exoplayer.ExoPlayer;
 
 import org.json.JSONArray;
@@ -30,6 +32,7 @@ import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.net.URLEncoder;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
@@ -50,11 +53,13 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
 
     static final String EXTRA_TEXT_URI = "text_uri";
     static final String EXTRA_CHUNK_INDEX = "chunk_index";
+    static final String EXTRA_TEXT_CONTENT = "text_content";
 
     private static final String PREFS = "dongting_player";
     private static final String CHANNEL_ID = "dongting_text_reader";
     private static final int NOTIFICATION_ID = 20260503;
     private static final int MAX_TTS_ERRORS = 5;
+    private static final int EXTERNAL_TTS_MAX_CHARS = 180;
     private static boolean serviceRunning = false;
     private static boolean servicePaused = true;
     private static boolean rangeTrackingSupported = false;
@@ -64,6 +69,7 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
     private SharedPreferences prefs;
     private TextToSpeech tts;
     private ExoPlayer bgPlayer;
+    private ExoPlayer externalTtsPlayer;
     private String textUri = "";
     private String title = "TXT 朗读";
     private int currentChunk = 0;
@@ -84,8 +90,59 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
                 .setUsage(C.USAGE_MEDIA)
                 .build();
         bgPlayer = new ExoPlayer.Builder(this).setAudioAttributes(attrs, false).build();
+        externalTtsPlayer = new ExoPlayer.Builder(this).setAudioAttributes(attrs, true).build();
+        externalTtsPlayer.addListener(new Player.Listener() {
+            @Override public void onPlaybackStateChanged(int playbackState) {
+                if (playbackState == Player.STATE_READY) {
+                    prefs.edit()
+                            .putString("lastExternalTtsState", "READY")
+                            .putString("ttsVisualMode:" + textUri, "chunk")
+                            .putInt("ttsRangeStart:" + textUri, 0)
+                            .putInt("ttsRangeEnd:" + textUri, 0)
+                            .apply();
+                }
+                if (playbackState == Player.STATE_ENDED) mainHandler.post(() -> {
+                    prefs.edit().putString("lastExternalTtsState", "ENDED").apply();
+                    if (paused) return;
+                    consecutiveErrors = 0;
+                    currentChunk++;
+                    if (!textUri.isEmpty()) prefs.edit().putInt("ttsChunk:" + textUri, currentChunk).apply();
+                    speakCurrent();
+                });
+            }
+
+            @Override public void onPlayerError(PlaybackException error) {
+                mainHandler.post(() -> {
+                    if (!paused && !chunks.isEmpty()) {
+                        prefs.edit()
+                                .putString("lastExternalTtsState", "ERROR")
+                                .putString("lastExternalTtsError", error.getErrorCodeName())
+                                .apply();
+                        fallbackFromExternalTts();
+                    }
+                });
+            }
+        });
         applyBackgroundRepeatMode();
-        tts = new TextToSpeech(this, this);
+        createTtsFromSystemDefault();
+    }
+
+    private void createTtsFromSystemDefault() {
+        String engine = currentSystemTtsEngine();
+        if (engine.isEmpty()) {
+            tts = new TextToSpeech(this, this);
+        } else {
+            tts = new TextToSpeech(this, this, engine);
+        }
+    }
+
+    private String currentSystemTtsEngine() {
+        try {
+            String engine = android.provider.Settings.Secure.getString(getContentResolver(), "tts_default_synth");
+            return engine == null ? "" : engine.trim();
+        } catch (Exception ignored) {
+            return "";
+        }
     }
 
     @Override
@@ -93,13 +150,22 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
         String action = intent == null ? null : intent.getAction();
         if (ACTION_START.equals(action)) {
             String uri = intent.getStringExtra(EXTRA_TEXT_URI);
-            if (uri != null && !uri.isEmpty()) {
+            String content = intent.getStringExtra(EXTRA_TEXT_CONTENT);
+            if (content != null && !content.trim().isEmpty()) {
+                textUri = "inline:" + content.hashCode();
+                title = "TXT 朗读";
+                currentChunk = Math.max(0, prefs.getInt("ttsChunk:" + textUri, 0));
+                paused = false;
+                loadTextContent(content);
+                if (ready || useExternalTts()) speakCurrent();
+                updateNotification(true);
+            } else if (uri != null && !uri.isEmpty()) {
                 textUri = uri;
                 title = readDisplayName(Uri.parse(uri));
                 currentChunk = Math.max(0, prefs.getInt("ttsChunk:" + textUri, 0));
                 paused = false;
                 loadText(Uri.parse(uri));
-                if (ready) speakCurrent();
+                if (ready || useExternalTts()) speakCurrent();
                 updateNotification(true);
             }
         } else if (ACTION_TOGGLE.equals(action)) {
@@ -171,7 +237,7 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
                         .apply();
             }
         });
-        if (!textUri.isEmpty() && !chunks.isEmpty()) speakCurrent();
+        if (!useExternalTts() && !textUri.isEmpty() && !chunks.isEmpty()) speakCurrent();
     }
 
     @Override
@@ -182,6 +248,7 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
             tts.stop();
             tts.shutdown();
         }
+        if (externalTtsPlayer != null) externalTtsPlayer.release();
         if (bgPlayer != null) bgPlayer.release();
         super.onDestroy();
     }
@@ -205,15 +272,23 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
         currentChunk = Math.min(currentChunk, Math.max(0, chunks.size() - 1));
     }
 
+    private void loadTextContent(String text) {
+        chunks.clear();
+        chunks.addAll(splitTextForTts(text == null ? "" : text));
+        currentChunk = Math.min(currentChunk, Math.max(0, chunks.size() - 1));
+    }
+
     private void speakCurrent() {
-        if (!ready || tts == null || chunks.isEmpty()) return;
+        if (chunks.isEmpty()) return;
+        if (!useExternalTts() && (!ready || tts == null)) return;
         if (currentChunk >= chunks.size()) {
             if (!textUri.isEmpty()) prefs.edit().putInt("ttsChunk:" + textUri, 0).apply();
+            if (playNextTextBook()) return;
             stopReading();
             return;
         }
         boolean resumeFromPaused = paused;
-        String chunk = chunks.get(currentChunk);
+        String chunk = currentSpeakText();
         int rangeStart = !textUri.isEmpty() ? prefs.getInt("ttsRangeStart:" + textUri, 0) : 0;
         currentSpeakOffset = resumeFromPaused ? Math.max(0, Math.min(rangeStart, Math.max(0, chunk.length() - 1))) : 0;
         String speakText = chunk.substring(currentSpeakOffset);
@@ -222,6 +297,7 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
                     .putInt("ttsChunk:" + textUri, currentChunk)
                     .putInt("ttsRangeStart:" + textUri, currentSpeakOffset)
                     .putInt("ttsRangeEnd:" + textUri, Math.min(chunk.length(), currentSpeakOffset + 1))
+                    .putString("ttsVisualMode:" + textUri, useExternalTts() ? "chunk" : "range")
                     .apply();
         }
         paused = false;
@@ -229,8 +305,110 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
         applyTtsSettings();
         startBackgroundMusic();
         updateNotification(true);
+        if (useExternalTts()) {
+            speakCurrentWithExternalTts(speakText);
+            return;
+        }
+        speakCurrentWithSystemTts(speakText);
+    }
+
+    private String currentSpeakText() {
+        if (chunks.isEmpty()) return "";
+        return chunks.get(Math.max(0, Math.min(currentChunk, chunks.size() - 1)));
+    }
+
+    private boolean playNextTextBook() {
+        String next = nextTextBookUri();
+        if (next.isEmpty()) return false;
+        textUri = next;
+        title = readDisplayName(Uri.parse(next));
+        currentChunk = Math.max(0, prefs.getInt("ttsChunk:" + textUri, 0));
+        loadText(Uri.parse(next));
+        if (chunks.isEmpty()) return playNextTextBook();
+        prefs.edit().putString("lastTextUri", textUri).apply();
+        speakCurrent();
+        return true;
+    }
+
+    private String nextTextBookUri() {
+        if (textUri == null || textUri.isEmpty() || textUri.startsWith("inline:")) return "";
+        List<String> books = new ArrayList<>();
+        try {
+            JSONArray array = new JSONArray(prefs.getString("textBooks", "[]"));
+            for (int i = 0; i < array.length(); i++) {
+                String uri = array.getJSONObject(i).optString("uri", "");
+                if (!uri.isEmpty()) books.add(uri);
+            }
+        } catch (JSONException ignored) {
+        }
+        int index = books.indexOf(textUri);
+        if (index < 0 || index + 1 >= books.size()) return "";
+        return books.get(index + 1);
+    }
+
+    private void speakCurrentWithSystemTts(String speakText) {
+        if (!ready || tts == null || speakText == null || speakText.isEmpty()) return;
+        if (externalTtsPlayer != null) externalTtsPlayer.stop();
         int result = tts.speak(speakText, TextToSpeech.QUEUE_FLUSH, null, "dongting_reader_" + currentChunk);
         if (result == TextToSpeech.ERROR) continueAfterTtsError();
+    }
+
+    private void speakCurrentWithExternalTts(String speakText) {
+        if (externalTtsPlayer == null || speakText == null || speakText.trim().isEmpty()) {
+            speakCurrentWithSystemTts(speakText);
+            return;
+        }
+        if (tts != null) tts.stop();
+        try {
+            Uri uri = buildExternalTtsUri(speakText);
+            prefs.edit()
+                    .putString("lastExternalTtsState", "REQUEST")
+                    .putString("lastExternalTtsError", "")
+                    .putString("lastExternalTtsInfo", "chunk=" + currentChunk + ", chars=" + speakText.length()
+                            + ", voice=" + prefs.getString("externalTtsVoice", ""))
+                    .apply();
+            externalTtsPlayer.stop();
+            externalTtsPlayer.clearMediaItems();
+            externalTtsPlayer.setMediaItem(MediaItem.fromUri(uri));
+            externalTtsPlayer.prepare();
+            externalTtsPlayer.play();
+        } catch (Exception ex) {
+            prefs.edit().putString("lastExternalTtsError", ex.getClass().getSimpleName()).apply();
+            fallbackFromExternalTts();
+        }
+    }
+
+    private void fallbackFromExternalTts() {
+        if (paused || chunks.isEmpty()) return;
+        if (ready && tts != null) {
+            speakCurrentWithSystemTts(currentSpeakText());
+            return;
+        }
+        continueAfterTtsError();
+    }
+
+    private Uri buildExternalTtsUri(String text) throws Exception {
+        String base = prefs.getString("externalTtsForwardUrl", "http://127.0.0.1:8774/forward");
+        if (base == null || base.trim().isEmpty()) base = "http://127.0.0.1:8774/forward";
+        String separator = base.contains("?") ? "&" : "?";
+        int speed = Math.max(0, Math.min(100, Math.round(prefs.getInt("ttsRate", 75) * 100f / 150f)));
+        int pitch = Math.max(0, Math.min(100, prefs.getInt("ttsPitch", 50)));
+        int volume = Math.max(0, Math.min(100, prefs.getInt("externalTtsVolume", 100)));
+        String voice = prefs.getString("externalTtsVoice", "");
+        StringBuilder url = new StringBuilder(base.trim())
+                .append(separator)
+                .append("text=").append(URLEncoder.encode(text, "UTF-8"))
+                .append("&speed=").append(speed)
+                .append("&volume=").append(volume)
+                .append("&pitch=").append(pitch);
+        if (voice != null && !voice.trim().isEmpty()) {
+            url.append("&voice=").append(URLEncoder.encode(voice.trim(), "UTF-8"));
+        }
+        return Uri.parse(url.toString());
+    }
+
+    private boolean useExternalTts() {
+        return "multitts".equals(prefs.getString("ttsProvider", "system"));
     }
 
     private void continueAfterTtsError() {
@@ -246,9 +424,16 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
     }
 
     private void toggle() {
-        if (tts == null) return;
         if (paused) {
-            speakCurrent();
+            if (useExternalTts() && externalTtsPlayer != null && externalTtsPlayer.getMediaItemCount() > 0) {
+                paused = false;
+                servicePaused = false;
+                startBackgroundMusic();
+                updateNotification(true);
+                externalTtsPlayer.play();
+            } else {
+                speakCurrent();
+            }
         } else {
             pauseReading();
         }
@@ -277,6 +462,7 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
         paused = true;
         servicePaused = true;
         if (tts != null) tts.stop();
+        if (externalTtsPlayer != null) externalTtsPlayer.pause();
         if (bgPlayer != null) bgPlayer.pause();
         if (!textUri.isEmpty()) prefs.edit().putInt("ttsChunk:" + textUri, currentChunk).apply();
         updateNotification(false);
@@ -286,6 +472,7 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
         paused = true;
         servicePaused = true;
         if (tts != null) tts.stop();
+        if (externalTtsPlayer != null) externalTtsPlayer.stop();
         if (bgPlayer != null) bgPlayer.pause();
         stopForeground(STOP_FOREGROUND_REMOVE);
         stopSelf();
@@ -547,14 +734,17 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
         List<String> result = new ArrayList<>();
         String normalized = text.replace("\r\n", "\n").replace('\r', '\n').trim();
         StringBuilder builder = new StringBuilder();
+        int softLimit = useExternalTts() ? 90 : 240;
+        int hardLimit = useExternalTts() ? EXTERNAL_TTS_MAX_CHARS : 480;
         for (int i = 0; i < normalized.length(); i++) {
             char ch = normalized.charAt(i);
             builder.append(ch);
-            boolean boundary = ch == '\n' || ch == '。' || ch == '！' || ch == '？' || ch == '.' || ch == '!' || ch == '?';
-            if (builder.length() >= 240 && boundary) {
+            boolean boundary = ch == '\n' || ch == '。' || ch == '；' || ch == '！' || ch == '？' || ch == '，'
+                    || ch == '.' || ch == '!' || ch == '?' || ch == ';' || ch == ',';
+            if (builder.length() >= softLimit && boundary) {
                 result.add(builder.toString().trim());
                 builder.setLength(0);
-            } else if (builder.length() >= 480) {
+            } else if (builder.length() >= hardLimit) {
                 result.add(builder.toString().trim());
                 builder.setLength(0);
             }
