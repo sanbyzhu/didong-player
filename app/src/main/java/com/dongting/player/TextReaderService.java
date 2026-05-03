@@ -10,7 +10,9 @@ import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.net.Uri;
 import android.os.Build;
+import android.os.Handler;
 import android.os.IBinder;
+import android.os.Looper;
 import android.provider.OpenableColumns;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.UtteranceProgressListener;
@@ -42,15 +44,19 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
     static final String ACTION_NEXT = "com.dongting.player.TEXT_NEXT";
     static final String ACTION_RESTART = "com.dongting.player.TEXT_RESTART";
     static final String ACTION_STOP = "com.dongting.player.TEXT_STOP";
+    static final String ACTION_BACKGROUND_UPDATE = "com.dongting.player.TEXT_BACKGROUND_UPDATE";
+    static final String ACTION_BACKGROUND_STOP = "com.dongting.player.TEXT_BACKGROUND_STOP";
 
     static final String EXTRA_TEXT_URI = "text_uri";
 
     private static final String PREFS = "dongting_player";
     private static final String CHANNEL_ID = "dongting_text_reader";
     private static final int NOTIFICATION_ID = 20260503;
+    private static final int MAX_TTS_ERRORS = 5;
     private static boolean serviceRunning = false;
     private static boolean servicePaused = true;
 
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final List<String> chunks = new ArrayList<>();
     private SharedPreferences prefs;
     private TextToSpeech tts;
@@ -58,6 +64,7 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
     private String textUri = "";
     private String title = "TXT 朗读";
     private int currentChunk = 0;
+    private int consecutiveErrors = 0;
     private boolean ready = false;
     private boolean paused = false;
 
@@ -72,8 +79,8 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
                 .setContentType(C.AUDIO_CONTENT_TYPE_MUSIC)
                 .setUsage(C.USAGE_MEDIA)
                 .build();
-        bgPlayer = new ExoPlayer.Builder(this).setAudioAttributes(attrs, true).build();
-        bgPlayer.setRepeatMode(androidx.media3.common.Player.REPEAT_MODE_ONE);
+        bgPlayer = new ExoPlayer.Builder(this).setAudioAttributes(attrs, false).build();
+        bgPlayer.setRepeatMode(androidx.media3.common.Player.REPEAT_MODE_ALL);
         tts = new TextToSpeech(this, this);
     }
 
@@ -103,6 +110,13 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
             speakCurrent();
         } else if (ACTION_STOP.equals(action)) {
             stopReading();
+        } else if (ACTION_BACKGROUND_UPDATE.equals(action)) {
+            updateBackgroundMusicFromPrefs();
+        } else if (ACTION_BACKGROUND_STOP.equals(action)) {
+            if (bgPlayer != null) {
+                bgPlayer.pause();
+                bgPlayer.seekTo(0);
+            }
         }
         return START_STICKY;
     }
@@ -127,14 +141,17 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
             }
 
             @Override public void onDone(String utteranceId) {
-                if (paused) return;
-                currentChunk++;
-                if (!textUri.isEmpty()) prefs.edit().putInt("ttsChunk:" + textUri, currentChunk).apply();
-                speakCurrent();
+                mainHandler.post(() -> {
+                    if (paused) return;
+                    consecutiveErrors = 0;
+                    currentChunk++;
+                    if (!textUri.isEmpty()) prefs.edit().putInt("ttsChunk:" + textUri, currentChunk).apply();
+                    speakCurrent();
+                });
             }
 
             @Override public void onError(String utteranceId) {
-                pauseReading();
+                mainHandler.post(() -> continueAfterTtsError());
             }
         });
         if (!textUri.isEmpty() && !chunks.isEmpty()) speakCurrent();
@@ -179,7 +196,20 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
         applyTtsSettings();
         startBackgroundMusic();
         updateNotification(true);
-        tts.speak(chunks.get(currentChunk), TextToSpeech.QUEUE_FLUSH, null, "dongting_reader_" + currentChunk);
+        int result = tts.speak(chunks.get(currentChunk), TextToSpeech.QUEUE_FLUSH, null, "dongting_reader_" + currentChunk);
+        if (result == TextToSpeech.ERROR) continueAfterTtsError();
+    }
+
+    private void continueAfterTtsError() {
+        if (paused || chunks.isEmpty()) return;
+        consecutiveErrors++;
+        currentChunk++;
+        if (!textUri.isEmpty()) prefs.edit().putInt("ttsChunk:" + textUri, currentChunk).apply();
+        if (consecutiveErrors >= MAX_TTS_ERRORS) {
+            pauseReading();
+            return;
+        }
+        mainHandler.postDelayed(this::speakCurrent, 300);
     }
 
     private void toggle() {
@@ -236,14 +266,59 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
     }
 
     private void startBackgroundMusic() {
-        String bgUri = prefs.getString("ttsBgUri", "");
-        if (bgUri.isEmpty() || bgPlayer == null) return;
-        if (bgPlayer.getMediaItemCount() == 0) {
-            bgPlayer.setMediaItem(MediaItem.fromUri(Uri.parse(bgUri)));
-            bgPlayer.prepare();
-        }
-        bgPlayer.setVolume(prefs.getInt("bgVolume", 25) / 100f);
+        if (bgPlayer == null) return;
+        if (bgPlayer.getMediaItemCount() == 0) prepareBackgroundMusicQueue();
+        if (bgPlayer.getMediaItemCount() == 0) return;
+        applyBackgroundMusicVolume();
         bgPlayer.play();
+    }
+
+    private void prepareBackgroundMusicQueue() {
+        if (bgPlayer == null) return;
+        List<String> uris = loadBackgroundMusicUris();
+        bgPlayer.clearMediaItems();
+        for (String raw : uris) bgPlayer.addMediaItem(MediaItem.fromUri(Uri.parse(raw)));
+        if (!uris.isEmpty()) bgPlayer.prepare();
+    }
+
+    private List<String> loadBackgroundMusicUris() {
+        List<String> uris = new ArrayList<>();
+        String raw = prefs.getString("bgPlaylist", "");
+        if (raw != null && !raw.isEmpty()) {
+            try {
+                JSONArray array = new JSONArray(raw);
+                for (int i = 0; i < array.length(); i++) {
+                    String uri = array.optString(i, "");
+                    if (!uri.isEmpty() && !uris.contains(uri)) uris.add(uri);
+                }
+            } catch (JSONException ignored) {
+            }
+        }
+        String legacy = prefs.getString("ttsBgUri", "");
+        if (!legacy.isEmpty() && !uris.contains(legacy)) uris.add(legacy);
+        return uris;
+    }
+
+    private void applyBackgroundMusicVolume() {
+        if (bgPlayer == null) return;
+        bgPlayer.setVolume(prefs.getInt("bgVolume", 25) / 100f);
+    }
+
+    private void updateBackgroundMusicFromPrefs() {
+        if (bgPlayer == null) return;
+        List<String> uris = loadBackgroundMusicUris();
+        if (uris.size() != bgPlayer.getMediaItemCount()) {
+            boolean wasPlaying = bgPlayer.isPlaying();
+            int index = Math.max(0, bgPlayer.getCurrentMediaItemIndex());
+            bgPlayer.clearMediaItems();
+            for (String raw : uris) bgPlayer.addMediaItem(MediaItem.fromUri(Uri.parse(raw)));
+            if (!uris.isEmpty()) {
+                bgPlayer.prepare();
+                bgPlayer.seekToDefaultPosition(Math.min(index, uris.size() - 1));
+                if (wasPlaying) bgPlayer.play();
+            }
+        }
+        applyBackgroundMusicVolume();
     }
 
     private void updateNotification(boolean reading) {
@@ -418,10 +493,10 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
             char ch = normalized.charAt(i);
             builder.append(ch);
             boolean boundary = ch == '\n' || ch == '。' || ch == '！' || ch == '？' || ch == '.' || ch == '!' || ch == '?';
-            if (builder.length() >= 350 && boundary) {
+            if (builder.length() >= 240 && boundary) {
                 result.add(builder.toString().trim());
                 builder.setLength(0);
-            } else if (builder.length() >= 700) {
+            } else if (builder.length() >= 480) {
                 result.add(builder.toString().trim());
                 builder.setLength(0);
             }

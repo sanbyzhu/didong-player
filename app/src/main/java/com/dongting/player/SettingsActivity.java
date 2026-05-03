@@ -78,6 +78,7 @@ public class SettingsActivity extends AppCompatActivity {
                 slider("背景音乐音量", "bgVolume", 100, 25),
                 btn("恢复朗读默认", v -> {
                     prefs.edit().putInt("ttsRate", 75).putInt("ttsPitch", 50).putInt("bgVolume", 25).remove("ttsVoice").apply();
+                    notifyBackgroundVolumeIfNeeded("bgVolume");
                     toast("朗读设置已恢复默认");
                 }),
                 btn("停止后台朗读", v -> {
@@ -131,7 +132,10 @@ public class SettingsActivity extends AppCompatActivity {
         bar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar seekBar, int progress, boolean fromUser) {
                 value.setText(title + "：" + progress);
-                if (fromUser) prefs.edit().putInt(key, progress).apply();
+                if (fromUser) {
+                    prefs.edit().putInt(key, progress).apply();
+                    notifyBackgroundVolumeIfNeeded(key);
+                }
             }
 
             @Override public void onStartTrackingTouch(SeekBar seekBar) {
@@ -139,11 +143,17 @@ public class SettingsActivity extends AppCompatActivity {
 
             @Override public void onStopTrackingTouch(SeekBar seekBar) {
                 prefs.edit().putInt(key, seekBar.getProgress()).apply();
+                notifyBackgroundVolumeIfNeeded(key);
             }
         });
         box.addView(value);
         box.addView(bar);
         return box;
+    }
+
+    private void notifyBackgroundVolumeIfNeeded(String key) {
+        if (!"bgVolume".equals(key) || !TextReaderService.isRunning()) return;
+        startService(new Intent(this, TextReaderService.class).setAction(TextReaderService.ACTION_BACKGROUND_UPDATE));
     }
 
     private View check(String text, String key, boolean defaultValue) {
@@ -190,6 +200,7 @@ public class SettingsActivity extends AppCompatActivity {
                             .putBoolean("stopAfterCurrent", false)
                             .putBoolean("stopAfterList", false)
                             .apply();
+                    notifyBackgroundVolumeIfNeeded("bgVolume");
                     toast("已恢复全部默认，返回播放器后生效");
                     recreate();
                 })
