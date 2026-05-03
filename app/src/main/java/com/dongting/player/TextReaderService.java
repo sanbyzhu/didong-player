@@ -44,10 +44,12 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
     static final String ACTION_NEXT = "com.dongting.player.TEXT_NEXT";
     static final String ACTION_RESTART = "com.dongting.player.TEXT_RESTART";
     static final String ACTION_STOP = "com.dongting.player.TEXT_STOP";
+    static final String ACTION_SEEK_CHUNK = "com.dongting.player.TEXT_SEEK_CHUNK";
     static final String ACTION_BACKGROUND_UPDATE = "com.dongting.player.TEXT_BACKGROUND_UPDATE";
     static final String ACTION_BACKGROUND_STOP = "com.dongting.player.TEXT_BACKGROUND_STOP";
 
     static final String EXTRA_TEXT_URI = "text_uri";
+    static final String EXTRA_CHUNK_INDEX = "chunk_index";
 
     private static final String PREFS = "dongting_player";
     private static final String CHANNEL_ID = "dongting_text_reader";
@@ -55,6 +57,7 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
     private static final int MAX_TTS_ERRORS = 5;
     private static boolean serviceRunning = false;
     private static boolean servicePaused = true;
+    private static boolean rangeTrackingSupported = false;
 
     private final Handler mainHandler = new Handler(Looper.getMainLooper());
     private final List<String> chunks = new ArrayList<>();
@@ -64,6 +67,7 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
     private String textUri = "";
     private String title = "TXT 朗读";
     private int currentChunk = 0;
+    private int currentSpeakOffset = 0;
     private int consecutiveErrors = 0;
     private boolean ready = false;
     private boolean paused = false;
@@ -80,7 +84,7 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
                 .setUsage(C.USAGE_MEDIA)
                 .build();
         bgPlayer = new ExoPlayer.Builder(this).setAudioAttributes(attrs, false).build();
-        bgPlayer.setRepeatMode(androidx.media3.common.Player.REPEAT_MODE_ALL);
+        applyBackgroundRepeatMode();
         tts = new TextToSpeech(this, this);
     }
 
@@ -108,6 +112,8 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
             currentChunk = 0;
             if (!textUri.isEmpty()) prefs.edit().putInt("ttsChunk:" + textUri, 0).apply();
             speakCurrent();
+        } else if (ACTION_SEEK_CHUNK.equals(action)) {
+            seekChunk(intent.getIntExtra(EXTRA_CHUNK_INDEX, currentChunk));
         } else if (ACTION_STOP.equals(action)) {
             stopReading();
         } else if (ACTION_BACKGROUND_UPDATE.equals(action)) {
@@ -153,6 +159,17 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
             @Override public void onError(String utteranceId) {
                 mainHandler.post(() -> continueAfterTtsError());
             }
+
+            @Override public void onRangeStart(String utteranceId, int start, int end, int frame) {
+                if (textUri.isEmpty()) return;
+                rangeTrackingSupported = true;
+                int safeStart = Math.max(0, currentSpeakOffset + start);
+                int safeEnd = Math.max(safeStart, currentSpeakOffset + end);
+                prefs.edit()
+                        .putInt("ttsRangeStart:" + textUri, safeStart)
+                        .putInt("ttsRangeEnd:" + textUri, safeEnd)
+                        .apply();
+            }
         });
         if (!textUri.isEmpty() && !chunks.isEmpty()) speakCurrent();
     }
@@ -177,6 +194,10 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
         return servicePaused;
     }
 
+    static boolean isRangeTrackingSupported() {
+        return rangeTrackingSupported;
+    }
+
     private void loadText(Uri uri) {
         chunks.clear();
         String text = readText(uri);
@@ -191,12 +212,24 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
             stopReading();
             return;
         }
+        boolean resumeFromPaused = paused;
+        String chunk = chunks.get(currentChunk);
+        int rangeStart = !textUri.isEmpty() ? prefs.getInt("ttsRangeStart:" + textUri, 0) : 0;
+        currentSpeakOffset = resumeFromPaused ? Math.max(0, Math.min(rangeStart, Math.max(0, chunk.length() - 1))) : 0;
+        String speakText = chunk.substring(currentSpeakOffset);
+        if (!textUri.isEmpty()) {
+            prefs.edit()
+                    .putInt("ttsChunk:" + textUri, currentChunk)
+                    .putInt("ttsRangeStart:" + textUri, currentSpeakOffset)
+                    .putInt("ttsRangeEnd:" + textUri, Math.min(chunk.length(), currentSpeakOffset + 1))
+                    .apply();
+        }
         paused = false;
         servicePaused = false;
         applyTtsSettings();
         startBackgroundMusic();
         updateNotification(true);
-        int result = tts.speak(chunks.get(currentChunk), TextToSpeech.QUEUE_FLUSH, null, "dongting_reader_" + currentChunk);
+        int result = tts.speak(speakText, TextToSpeech.QUEUE_FLUSH, null, "dongting_reader_" + currentChunk);
         if (result == TextToSpeech.ERROR) continueAfterTtsError();
     }
 
@@ -223,8 +256,19 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
 
     private void moveChunk(int delta) {
         if (chunks.isEmpty()) return;
-        currentChunk = Math.max(0, Math.min(chunks.size() - 1, currentChunk + delta));
-        if (!textUri.isEmpty()) prefs.edit().putInt("ttsChunk:" + textUri, currentChunk).apply();
+        seekChunk(currentChunk + delta);
+    }
+
+    private void seekChunk(int index) {
+        if (chunks.isEmpty()) return;
+        currentChunk = Math.max(0, Math.min(chunks.size() - 1, index));
+        if (!textUri.isEmpty()) {
+            prefs.edit()
+                    .putInt("ttsChunk:" + textUri, currentChunk)
+                    .putInt("ttsRangeStart:" + textUri, 0)
+                    .putInt("ttsRangeEnd:" + textUri, 0)
+                    .apply();
+        }
         paused = false;
         speakCurrent();
     }
@@ -278,7 +322,11 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
         List<String> uris = loadBackgroundMusicUris();
         bgPlayer.clearMediaItems();
         for (String raw : uris) bgPlayer.addMediaItem(MediaItem.fromUri(Uri.parse(raw)));
-        if (!uris.isEmpty()) bgPlayer.prepare();
+        if (!uris.isEmpty()) {
+            applyBackgroundRepeatMode();
+            bgPlayer.prepare();
+            bgPlayer.seekToDefaultPosition(selectedBackgroundIndex(uris.size()));
+        }
     }
 
     private List<String> loadBackgroundMusicUris() {
@@ -307,18 +355,28 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
     private void updateBackgroundMusicFromPrefs() {
         if (bgPlayer == null) return;
         List<String> uris = loadBackgroundMusicUris();
-        if (uris.size() != bgPlayer.getMediaItemCount()) {
-            boolean wasPlaying = bgPlayer.isPlaying();
-            int index = Math.max(0, bgPlayer.getCurrentMediaItemIndex());
-            bgPlayer.clearMediaItems();
-            for (String raw : uris) bgPlayer.addMediaItem(MediaItem.fromUri(Uri.parse(raw)));
-            if (!uris.isEmpty()) {
-                bgPlayer.prepare();
-                bgPlayer.seekToDefaultPosition(Math.min(index, uris.size() - 1));
-                if (wasPlaying) bgPlayer.play();
-            }
+        boolean wasPlaying = bgPlayer.isPlaying();
+        bgPlayer.clearMediaItems();
+        for (String raw : uris) bgPlayer.addMediaItem(MediaItem.fromUri(Uri.parse(raw)));
+        applyBackgroundRepeatMode();
+        if (!uris.isEmpty()) {
+            bgPlayer.prepare();
+            bgPlayer.seekToDefaultPosition(selectedBackgroundIndex(uris.size()));
+            if (wasPlaying) bgPlayer.play();
         }
         applyBackgroundMusicVolume();
+    }
+
+    private int selectedBackgroundIndex(int size) {
+        if (size <= 0) return 0;
+        return Math.max(0, Math.min(prefs.getInt("bgSelectedIndex", 0), size - 1));
+    }
+
+    private void applyBackgroundRepeatMode() {
+        if (bgPlayer == null) return;
+        bgPlayer.setRepeatMode(prefs.getBoolean("bgRepeatOne", false)
+                ? androidx.media3.common.Player.REPEAT_MODE_ONE
+                : androidx.media3.common.Player.REPEAT_MODE_ALL);
     }
 
     private void updateNotification(boolean reading) {

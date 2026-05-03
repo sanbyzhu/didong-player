@@ -152,6 +152,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private TextView speedLabel;
     private TextView loopLabel;
     private TextView listSummary;
+    private TextView backgroundStatus;
     private TextView audioEffectStatus;
     private TextView videoSubtitleLabel;
     private Button advancedToggleButton;
@@ -287,6 +288,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                         if (addBackgroundMusic(uri, false)) added++;
                     }
                     if (added > 0) {
+                        int firstNewIndex = Math.max(0, backgroundMusicUris.size() - added);
+                        prefs.edit().putInt("bgSelectedIndex", firstNewIndex).apply();
                         saveBackgroundMusicList();
                         loadBackgroundMusicList();
                         prepareBackgroundMusicQueue(true);
@@ -434,7 +437,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 .setUsage(C.USAGE_MEDIA)
                 .build();
         bgPlayer = new ExoPlayer.Builder(this).setAudioAttributes(attrs, false).build();
-        bgPlayer.setRepeatMode(Player.REPEAT_MODE_ALL);
+        applyBackgroundRepeatMode();
         loadBackgroundMusicList();
         prepareBackgroundMusicQueue(false);
         Intent serviceIntent = new Intent(this, PlaybackService.class);
@@ -603,6 +606,14 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 btn("播放页", v -> showNowPlayingPage()),
                 btn("媒体列表", v -> showMediaListDialog())
         ));
+        controls.addView(row(
+                btn("背景管理", v -> showBackgroundMusicDialog()),
+                btn("添加背景", v -> pickBackground()),
+                btn("停背景", v -> stopBackgroundMusic()),
+                btn("下一背景", v -> playNextBackgroundMusic())
+        ));
+        backgroundStatus = label("", 13, COLOR_SUBTLE);
+        controls.addView(backgroundStatus);
 
         controls.addView(row(
                 btn("收藏当前", v -> addCurrentToFavorites()),
@@ -2223,6 +2234,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         @Override public void run() {
             updatePositionUi();
             updateVisualStage();
+            updateBackgroundStatus();
             handler.postDelayed(this, 500);
         }
     };
@@ -2243,7 +2255,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private String visualBodyText(@Nullable MediaEntry entry, boolean reading) {
-        if (reading || !importedText.trim().isEmpty() && entry == null) {
+        boolean mediaPlaying = player != null && player.isPlaying() && entry != null;
+        if (reading && !mediaPlaying) {
             String chunk = currentReadingChunk();
             if (!chunk.isEmpty()) return chunk;
         }
@@ -2263,7 +2276,28 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         int index = currentTextChunk;
         if (!importedTextKey.isEmpty()) index = prefs.getInt("ttsChunk:" + importedTextKey, currentTextChunk);
         index = Math.max(0, Math.min(index, textChunks.size() - 1));
-        return "朗读文字  " + (index + 1) + "/" + textChunks.size() + "\n" + textChunks.get(index);
+        int start = importedTextKey.isEmpty() ? -1 : prefs.getInt("ttsRangeStart:" + importedTextKey, -1);
+        int end = importedTextKey.isEmpty() ? -1 : prefs.getInt("ttsRangeEnd:" + importedTextKey, -1);
+        return readingWindowText(textChunks, index, start, end);
+    }
+
+    private String readingWindowText(List<String> chunks, int index, int rangeStart, int rangeEnd) {
+        if (chunks == null || chunks.isEmpty()) return "";
+        index = Math.max(0, Math.min(index, chunks.size() - 1));
+        StringBuilder builder = new StringBuilder();
+        builder.append("朗读文字  ").append(index + 1).append("/").append(chunks.size()).append('\n');
+        builder.append("▶ ").append(readingCurrentPreview(chunks.get(index), rangeStart, rangeEnd));
+        return builder.toString();
+    }
+
+    private String readingCurrentPreview(String text, int rangeStart, int rangeEnd) {
+        String value = text == null ? "" : text.replace('\n', ' ').trim();
+        if (rangeStart < 0 || rangeStart >= value.length()) return value;
+        rangeEnd = Math.max(rangeStart + 1, Math.min(rangeEnd, value.length()));
+        String before = value.substring(0, rangeStart);
+        String current = value.substring(rangeStart, rangeEnd);
+        String after = value.substring(rangeEnd);
+        return before + "【" + current + "】" + after;
     }
 
     private void updatePositionUi() {
@@ -3782,6 +3816,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         message.append("均衡器：").append(equalizer != null && equalizer.hasControl() ? "可控" : "可能受设备限制").append('\n');
         message.append("画中画：").append(Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ? "系统支持" : "系统不支持").append('\n');
         message.append("TTS：").append(tts == null ? "初始化中" : "已初始化").append('\n');
+        message.append("TTS字词高亮：").append(TextReaderService.isRangeTrackingSupported() ? "已收到系统回调" : "等待系统支持/开始朗读后检测").append('\n');
         message.append("数据库镜像：").append(database == null ? "未连接" : "已启用");
         new AlertDialog.Builder(this)
                 .setTitle("设备体验自检")
@@ -3827,36 +3862,91 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private void showBackgroundMusicDialog() {
         loadBackgroundMusicList();
-        String current = backgroundMusicUris.isEmpty() ? "未添加" : backgroundMusicUris.size() + " 首";
-        String state = bgPlayer != null && bgPlayer.isPlaying() ? "正在播放" : "已暂停/未播放";
-        String[] actions = new String[]{
-                "添加背景音乐",
-                "播放/暂停背景音乐",
-                "下一首背景音乐",
-                "停止背景音乐",
-                "查看背景音乐列表",
-                "清空背景音乐列表"
-        };
-        new AlertDialog.Builder(this)
-                .setTitle("背景音乐 · " + current)
-                .setMessage("状态：" + state + "\n可用于 TXT 朗读，也可以在听音频时作为轻背景音。")
-                .setItems(actions, (dialog, which) -> {
-                    if (which == 0) {
-                        pickBackground();
-                    } else if (which == 1) {
-                        toggleBackgroundMusic();
-                    } else if (which == 2) {
-                        playNextBackgroundMusic();
-                    } else if (which == 3) {
-                        stopBackgroundMusic();
-                    } else if (which == 4) {
-                        showBackgroundMusicListDialog();
-                    } else if (which == 5) {
-                        confirmClearBackgroundMusic();
-                    }
+        LinearLayout panel = new LinearLayout(this);
+        panel.setOrientation(LinearLayout.VERTICAL);
+        panel.setPadding(dp(10), dp(8), dp(10), dp(8));
+        panel.setBackgroundColor(COLOR_BG);
+
+        TextView summary = label(backgroundMusicSummary(), 14, COLOR_SUBTLE);
+        panel.addView(summary);
+        panel.addView(row(
+                btn("添加", v -> pickBackground()),
+                btn("播放/暂停", v -> toggleBackgroundMusic()),
+                btn("下一首", v -> playNextBackgroundMusic()),
+                btn(prefs.getBoolean("bgRepeatOne", false) ? "单曲循环" : "列表循环", v -> {
+                    toggleBackgroundRepeatMode();
+                    showBackgroundMusicDialog();
                 })
+        ));
+        panel.addView(row(
+                btn("停止", v -> stopBackgroundMusic()),
+                btn("删当前", v -> removeSelectedBackgroundMusic()),
+                btn("清空", v -> confirmClearBackgroundMusic()),
+                btn("设默认", v -> setSelectedBackgroundDefault())
+        ));
+        panel.addView(row(
+                btn("上移", v -> moveSelectedBackgroundMusic(-1)),
+                btn("下移", v -> moveSelectedBackgroundMusic(1)),
+                btn("删除列表", v -> showDeleteBackgroundMusicDialog()),
+                btn("刷新", v -> showBackgroundMusicDialog())
+        ));
+
+        ListView listView = new ListView(this);
+        listView.setBackgroundColor(COLOR_PANEL);
+        ArrayAdapter<String> adapter = new ArrayAdapter<String>(this, android.R.layout.simple_list_item_1, backgroundMusicLabels()) {
+            @Override
+            public View getView(int position, View convertView, ViewGroup parent) {
+                TextView view = (TextView) super.getView(position, convertView, parent);
+                view.setTextColor(position == selectedBackgroundIndex() ? COLOR_ACCENT : COLOR_TEXT);
+                view.setTextSize(position == selectedBackgroundIndex() ? 17 : 15);
+                view.setPadding(dp(12), dp(8), dp(12), dp(8));
+                view.setBackgroundColor(position == selectedBackgroundIndex() ? 0xFF4B2A12 : COLOR_PANEL);
+                return view;
+            }
+        };
+        listView.setAdapter(adapter);
+        listView.setOnItemClickListener((parent, view, position, id) -> playBackgroundAt(position));
+        panel.addView(listView, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(260)));
+
+        new AlertDialog.Builder(this)
+                .setTitle("背景音乐管理")
+                .setView(panel)
                 .setNegativeButton("关闭", null)
                 .show();
+    }
+
+    private void updateBackgroundStatus() {
+        if (backgroundStatus == null) return;
+        loadBackgroundMusicList();
+        if (backgroundMusicUris.isEmpty()) {
+            backgroundStatus.setText("背景音乐：未添加");
+            return;
+        }
+        int index = selectedBackgroundIndex();
+        String name = displayName(Uri.parse(backgroundMusicUris.get(index)));
+        String state = bgPlayer != null && bgPlayer.isPlaying() ? "播放中" : "已暂停";
+        int volume = bgVolumeBar == null ? prefs.getInt("bgVolume", 25) : bgVolumeBar.getProgress();
+        backgroundStatus.setText("背景：" + name + " · " + state + " · "
+                + (prefs.getBoolean("bgRepeatOne", false) ? "单曲循环" : "列表循环") + " · " + volume + "%");
+    }
+
+    private String backgroundMusicSummary() {
+        String count = backgroundMusicUris.isEmpty() ? "未添加背景音乐" : "共 " + backgroundMusicUris.size() + " 首";
+        String state = bgPlayer != null && bgPlayer.isPlaying() ? "正在播放" : "已暂停/未播放";
+        return count + " · " + state + " · " + (prefs.getBoolean("bgRepeatOne", false) ? "单曲循环" : "列表循环");
+    }
+
+    private List<String> backgroundMusicLabels() {
+        List<String> labels = new ArrayList<>();
+        if (backgroundMusicUris.isEmpty()) {
+            labels.add("还没有背景音乐，点上方“添加”选择音频文件");
+            return labels;
+        }
+        int selected = selectedBackgroundIndex();
+        for (int i = 0; i < backgroundMusicUris.size(); i++) {
+            labels.add((i == selected ? "正在选中  " : "") + (i + 1) + ". " + displayName(Uri.parse(backgroundMusicUris.get(i))));
+        }
+        return labels;
     }
 
     private void loadBackgroundMusicList() {
@@ -3885,8 +3975,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         SharedPreferences.Editor editor = prefs.edit().putString("bgPlaylist", array.toString());
         if (backgroundMusicUris.isEmpty()) {
             editor.remove("ttsBgUri");
+            editor.remove("bgSelectedIndex");
         } else {
             editor.putString("ttsBgUri", backgroundMusicUris.get(0));
+            editor.putInt("bgSelectedIndex", selectedBackgroundIndex());
         }
         editor.apply();
         notifyTextReaderBackground(TextReaderService.ACTION_BACKGROUND_UPDATE);
@@ -3899,7 +3991,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             bgPlayer.addMediaItem(MediaItem.fromUri(Uri.parse(raw)));
         }
         if (!backgroundMusicUris.isEmpty()) {
+            applyBackgroundRepeatMode();
             bgPlayer.prepare();
+            bgPlayer.seekToDefaultPosition(selectedBackgroundIndex());
             bgPlayer.setVolume(bgVolumeBar == null ? prefs.getInt("bgVolume", 25) / 100f : bgVolumeBar.getProgress() / 100f);
             if (playWhenReady) bgPlayer.play();
         }
@@ -3912,6 +4006,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             return;
         }
         if (bgPlayer.getMediaItemCount() == 0) prepareBackgroundMusicQueue(false);
+        applyBackgroundRepeatMode();
         bgPlayer.setVolume(bgVolumeBar == null ? prefs.getInt("bgVolume", 25) / 100f : bgVolumeBar.getProgress() / 100f);
         if (bgPlayer.isPlaying()) {
             bgPlayer.pause();
@@ -3929,7 +4024,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             return;
         }
         if (bgPlayer.getMediaItemCount() == 0) prepareBackgroundMusicQueue(false);
+        applyBackgroundRepeatMode();
         bgPlayer.seekToNextMediaItem();
+        prefs.edit().putInt("bgSelectedIndex", Math.max(0, bgPlayer.getCurrentMediaItemIndex())).apply();
+        notifyTextReaderBackground(TextReaderService.ACTION_BACKGROUND_UPDATE);
         bgPlayer.play();
         status("已切换下一首背景音乐");
     }
@@ -3956,13 +4054,52 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         new AlertDialog.Builder(this)
                 .setTitle("背景音乐列表")
                 .setItems(labels, (dialog, which) -> {
-                    prepareBackgroundMusicQueue(false);
-                    bgPlayer.seekToDefaultPosition(which);
-                    bgPlayer.play();
+                    playBackgroundAt(which);
                     status("正在播放背景音乐：" + labels[which]);
                 })
                 .setNegativeButton("删除一首", (dialog, which) -> showDeleteBackgroundMusicDialog())
                 .show();
+    }
+
+    private void playBackgroundAt(int index) {
+        loadBackgroundMusicList();
+        if (backgroundMusicUris.isEmpty()) {
+            pickBackground();
+            return;
+        }
+        if (index < 0 || index >= backgroundMusicUris.size()) return;
+        prefs.edit().putInt("bgSelectedIndex", index).apply();
+        prepareBackgroundMusicQueue(false);
+        bgPlayer.seekToDefaultPosition(index);
+        bgPlayer.setVolume(bgVolumeBar == null ? prefs.getInt("bgVolume", 25) / 100f : bgVolumeBar.getProgress() / 100f);
+        bgPlayer.play();
+        notifyTextReaderBackground(TextReaderService.ACTION_BACKGROUND_UPDATE);
+        updateBackgroundStatus();
+        status("正在播放背景音乐：" + displayName(Uri.parse(backgroundMusicUris.get(index))));
+    }
+
+    private int selectedBackgroundIndex() {
+        int index = prefs.getInt("bgSelectedIndex", 0);
+        if (backgroundMusicUris.isEmpty()) return 0;
+        return Math.max(0, Math.min(index, backgroundMusicUris.size() - 1));
+    }
+
+    private String backgroundRepeatText() {
+        return prefs.getBoolean("bgRepeatOne", false) ? "循环：单曲循环" : "循环：列表循环";
+    }
+
+    private void toggleBackgroundRepeatMode() {
+        boolean repeatOne = !prefs.getBoolean("bgRepeatOne", false);
+        prefs.edit().putBoolean("bgRepeatOne", repeatOne).apply();
+        applyBackgroundRepeatMode();
+        notifyTextReaderBackground(TextReaderService.ACTION_BACKGROUND_UPDATE);
+        updateBackgroundStatus();
+        status(repeatOne ? "背景音乐已设为单曲循环" : "背景音乐已设为列表循环");
+    }
+
+    private void applyBackgroundRepeatMode() {
+        if (bgPlayer == null) return;
+        bgPlayer.setRepeatMode(prefs.getBoolean("bgRepeatOne", false) ? Player.REPEAT_MODE_ONE : Player.REPEAT_MODE_ALL);
     }
 
     private void showDeleteBackgroundMusicDialog() {
@@ -3974,11 +4111,57 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 .setTitle("删除哪首背景音乐？")
                 .setItems(labels, (dialog, which) -> {
                     backgroundMusicUris.remove(which);
+                    int selected = Math.min(selectedBackgroundIndex(), Math.max(0, backgroundMusicUris.size() - 1));
+                    prefs.edit().putInt("bgSelectedIndex", selected).apply();
                     saveBackgroundMusicList();
                     prepareBackgroundMusicQueue(false);
                     status("已删除背景音乐：" + labels[which]);
                 })
                 .show();
+    }
+
+    private void removeSelectedBackgroundMusic() {
+        loadBackgroundMusicList();
+        if (backgroundMusicUris.isEmpty()) {
+            status("还没有背景音乐");
+            return;
+        }
+        int index = selectedBackgroundIndex();
+        String name = displayName(Uri.parse(backgroundMusicUris.get(index)));
+        backgroundMusicUris.remove(index);
+        prefs.edit().putInt("bgSelectedIndex", Math.min(index, Math.max(0, backgroundMusicUris.size() - 1))).apply();
+        saveBackgroundMusicList();
+        prepareBackgroundMusicQueue(false);
+        updateBackgroundStatus();
+        status("已删除当前背景音乐：" + name);
+    }
+
+    private void moveSelectedBackgroundMusic(int delta) {
+        loadBackgroundMusicList();
+        int index = selectedBackgroundIndex();
+        int target = index + delta;
+        if (target < 0 || target >= backgroundMusicUris.size()) {
+            status("背景音乐已经在边界位置");
+            return;
+        }
+        Collections.swap(backgroundMusicUris, index, target);
+        prefs.edit().putInt("bgSelectedIndex", target).apply();
+        saveBackgroundMusicList();
+        prepareBackgroundMusicQueue(bgPlayer != null && bgPlayer.isPlaying());
+        updateBackgroundStatus();
+        status(delta < 0 ? "背景音乐已上移" : "背景音乐已下移");
+    }
+
+    private void setSelectedBackgroundDefault() {
+        loadBackgroundMusicList();
+        if (backgroundMusicUris.isEmpty()) return;
+        int index = selectedBackgroundIndex();
+        if (index > 0) Collections.swap(backgroundMusicUris, 0, index);
+        prefs.edit().putInt("bgSelectedIndex", 0).apply();
+        saveBackgroundMusicList();
+        prepareBackgroundMusicQueue(bgPlayer != null && bgPlayer.isPlaying());
+        updateBackgroundStatus();
+        status("已设为默认背景音乐");
     }
 
     private void confirmClearBackgroundMusic() {
@@ -4637,10 +4820,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             float cy = height * 0.52f;
             float r = Math.min(width, height) * 0.34f;
             paint.setStyle(Paint.Style.FILL);
-            paint.setColor(0xFF743B16);
+            paint.setColor(reading ? 0x66743B16 : 0xFF743B16);
             rect.set(cx - r * 0.88f, cy - r, cx + r * 0.88f, cy + r);
             canvas.drawOval(rect, paint);
-            paint.setColor(0xFF140B07);
+            paint.setColor(reading ? 0x66140B07 : 0xFF140B07);
             rect.set(cx - r * 0.58f, cy - r * 0.72f, cx + r * 0.58f, cy + r * 0.72f);
             canvas.drawOval(rect, paint);
 
@@ -4689,8 +4872,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         }
 
         private void drawStageText(Canvas canvas, int width, int height, float t) {
-            float left = width * 0.43f;
-            float right = width - dp(14);
+            float left = reading ? dp(18) : width * 0.43f;
+            float right = reading ? width - dp(18) : width - dp(14);
             textPaint.setShader(null);
             textPaint.setTypeface(Typeface.DEFAULT_BOLD);
             textPaint.setTextSize(dp(18));
@@ -4703,13 +4886,30 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             drawSingleLine(canvas, subtitle, left, dp(56), right - left, textPaint);
 
             textPaint.setTextSize(reading ? dp(15) : dp(14));
-            textPaint.setColor(reading ? 0xFFFFD36A : 0xFFEAD9BE);
-            List<String> lines = wrapText(body.replace("\r", "").replace("\n", "  "), textPaint, right - left);
+            List<String> lines = wrapText(body.replace("\r", ""), textPaint, right - left);
             int maxLines = Math.max(3, (height - dp(104)) / dp(24));
-            int offset = reading && lines.size() > maxLines ? ((int) (t / 2.2f)) % lines.size() : 0;
+            int focusLine = 0;
+            if (reading) {
+                for (int i = 0; i < lines.size(); i++) {
+                    if (lines.get(i).contains("▶") || lines.get(i).contains("【")) {
+                        focusLine = i;
+                        break;
+                    }
+                }
+            }
+            int offset = reading && lines.size() > maxLines ? Math.max(0, Math.min(lines.size() - maxLines, focusLine - 1)) : 0;
             float y = dp(86);
             for (int i = 0; i < Math.min(maxLines, lines.size()); i++) {
-                canvas.drawText(lines.get((offset + i) % lines.size()), left, y, textPaint);
+                String line = lines.get(offset + i);
+                boolean current = reading && (line.contains("▶") || line.contains("【"));
+                textPaint.setTypeface(current ? Typeface.DEFAULT_BOLD : Typeface.DEFAULT);
+                textPaint.setColor(current ? 0xFFFFF4E2 : reading ? 0xCCFFD36A : 0xFFEAD9BE);
+                if (current) {
+                    paint.setStyle(Paint.Style.FILL);
+                    paint.setColor(0x55FFB451);
+                    canvas.drawRoundRect(left - dp(6), y - dp(17), right, y + dp(5), dp(6), dp(6), paint);
+                }
+                canvas.drawText(line, left, y, textPaint);
                 y += dp(24);
             }
         }
@@ -4731,7 +4931,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             for (int i = 0; i < value.length(); i++) {
                 char ch = value.charAt(i);
                 line.append(ch);
-                if (p.measureText(line.toString()) >= maxWidth || ch == '。' || ch == '！' || ch == '？') {
+                if (p.measureText(line.toString()) >= maxWidth || ch == '\n' || ch == '。' || ch == '！' || ch == '？') {
                     lines.add(line.toString().trim());
                     line.setLength(0);
                 }

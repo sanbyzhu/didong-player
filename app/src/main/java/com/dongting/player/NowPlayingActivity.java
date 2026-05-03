@@ -15,11 +15,13 @@ import android.provider.OpenableColumns;
 import android.view.Gravity;
 import android.view.ViewGroup;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.SeekBar;
 import android.widget.TextView;
 
 import androidx.annotation.Nullable;
+import androidx.appcompat.app.AlertDialog;
 import androidx.appcompat.app.AppCompatActivity;
 import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
@@ -103,6 +105,10 @@ public class NowPlayingActivity extends AppCompatActivity {
         seekBar.setMax(1000);
         seekBar.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
             @Override public void onProgressChanged(SeekBar bar, int progress, boolean fromUser) {
+                if (fromUser && isReadingMode()) {
+                    time.setText(readingProgressTextForProgress(progress));
+                    return;
+                }
                 if (fromUser && player != null && player.getDuration() > 0 && player.getDuration() != C.TIME_UNSET) {
                     long target = player.getDuration() * progress / 1000L;
                     time.setText(MediaUtils.formatMs(target) + " / " + MediaUtils.formatMs(player.getDuration()));
@@ -110,6 +116,11 @@ public class NowPlayingActivity extends AppCompatActivity {
             }
             @Override public void onStartTrackingTouch(SeekBar bar) { dragging = true; }
             @Override public void onStopTrackingTouch(SeekBar bar) {
+                if (isReadingMode()) {
+                    seekReadingByProgress(bar.getProgress());
+                    dragging = false;
+                    return;
+                }
                 if (player != null && player.getDuration() > 0 && player.getDuration() != C.TIME_UNSET) {
                     player.seekTo(player.getDuration() * bar.getProgress() / 1000L);
                     savePosition();
@@ -118,6 +129,11 @@ public class NowPlayingActivity extends AppCompatActivity {
             }
         });
         playButton = btn("播放/暂停", v -> {
+            if (isReadingMode()) {
+                sendTextReaderAction(TextReaderService.ACTION_TOGGLE);
+                updateUi();
+                return;
+            }
             if (player == null) return;
             if (player.isPlaying()) player.pause(); else player.play();
             updateUi();
@@ -133,9 +149,23 @@ public class NowPlayingActivity extends AppCompatActivity {
         root.addView(time);
         root.addView(seekBar);
         root.addView(row(
-                btn("上一首", v -> { if (player != null && player.hasPreviousMediaItem()) player.seekToPreviousMediaItem(); }),
+                btn("上一首", v -> {
+                    if (isReadingMode()) {
+                        sendTextReaderAction(TextReaderService.ACTION_PREVIOUS);
+                    } else if (player != null && player.hasPreviousMediaItem()) {
+                        player.seekToPreviousMediaItem();
+                    }
+                    updateUi();
+                }),
                 playButton,
-                btn("下一首", v -> { if (player != null && player.hasNextMediaItem()) player.seekToNextMediaItem(); })
+                btn("下一首", v -> {
+                    if (isReadingMode()) {
+                        sendTextReaderAction(TextReaderService.ACTION_NEXT);
+                    } else if (player != null && player.hasNextMediaItem()) {
+                        player.seekToNextMediaItem();
+                    }
+                    updateUi();
+                })
         ));
         root.addView(row(
                 btn("快退15秒", v -> seekBy(-15000)),
@@ -147,12 +177,26 @@ public class NowPlayingActivity extends AppCompatActivity {
                 btn("加速", v -> changeSpeed(0.25f)),
                 btn("循环模式", v -> cycleRepeatMode())
         ));
+        root.addView(row(
+                btn("\u76ee\u5f55", v -> showReadingCatalogDialog()),
+                btn("\u4e66\u7b7e", v -> showReadingBookmarksDialog()),
+                btn("\u52a0\u4e66\u7b7e", v -> addReadingBookmark())
+        ));
+        root.addView(row(
+                btn("\u641c\u7d22", v -> showReadingSearchDialog()),
+                btn("\u4e0a\u4e00\u6bb5", v -> seekReadingByDelta(-1)),
+                btn("\u4e0b\u4e00\u6bb5", v -> seekReadingByDelta(1))
+        ));
         root.addView(speed);
         root.addView(mode);
         return root;
     }
 
     private void seekBy(long delta) {
+        if (isReadingMode()) {
+            seekReadingByDelta(delta < 0 ? -1 : 1);
+            return;
+        }
         if (player == null) return;
         long duration = player.getDuration();
         long target = Math.max(0, player.getCurrentPosition() + delta);
@@ -163,6 +207,7 @@ public class NowPlayingActivity extends AppCompatActivity {
     }
 
     private void changeSpeed(float delta) {
+        if (isReadingMode()) return;
         if (player == null) return;
         float next = Math.max(0.25f, Math.min(8f, player.getPlaybackParameters().speed + delta));
         player.setPlaybackParameters(new PlaybackParameters(next, 1f));
@@ -171,6 +216,7 @@ public class NowPlayingActivity extends AppCompatActivity {
     }
 
     private void cycleRepeatMode() {
+        if (isReadingMode()) return;
         if (player == null) return;
         if (player.getRepeatMode() == Player.REPEAT_MODE_OFF) {
             player.setRepeatMode(Player.REPEAT_MODE_ONE);
@@ -202,6 +248,10 @@ public class NowPlayingActivity extends AppCompatActivity {
     };
 
     private void updateUi() {
+        if (isReadingMode()) {
+            updateReadingUi();
+            return;
+        }
         if (player == null) return;
         if (player.getCurrentMediaItem() != null) {
             CharSequence t = player.getCurrentMediaItem().mediaMetadata.title;
@@ -221,14 +271,99 @@ public class NowPlayingActivity extends AppCompatActivity {
         if (visual != null) visual.setText(nowPlayingBody(position));
     }
 
+    private boolean isReadingMode() {
+        return TextReaderService.isRunning() && (player == null || !player.isPlaying());
+    }
+
+    private void updateReadingUi() {
+        String uri = prefs.getString("lastTextUri", "");
+        String name = uri.isEmpty() ? "TXT 朗读" : displayName(Uri.parse(uri));
+        title.setText(name);
+        subtitle.setText(TextReaderService.isPaused() ? "TXT朗读 · 已暂停" : "TXT朗读 · 正在朗读");
+        time.setText(readingProgressText(uri));
+        if (!dragging) seekBar.setProgress(readingProgressValue(uri));
+        playButton.setText(TextReaderService.isPaused() ? "继续" : "暂停");
+        speed.setText("朗读由系统 TTS 控制");
+        mode.setText("上一首/下一首 = 上一段/下一段");
+        if (visual != null) visual.setText(currentReadingChunk());
+    }
+
+    private String readingProgressText(String uri) {
+        if (uri == null || uri.isEmpty()) return "TXT 朗读";
+        String text = readText(Uri.parse(uri));
+        List<String> chunks = splitTextForTts(text);
+        if (chunks.isEmpty()) return "TXT 朗读";
+        int index = Math.max(0, Math.min(prefs.getInt("ttsChunk:" + uri, 0), chunks.size() - 1));
+        return "第 " + (index + 1) + " / " + chunks.size() + " 段";
+    }
+
+    private String readingProgressTextForProgress(int progress) {
+        String uri = prefs.getString("lastTextUri", "");
+        if (uri == null || uri.isEmpty()) return "\u0054\u0058\u0054 \u6717\u8bfb";
+        List<String> chunks = splitTextForTts(readText(Uri.parse(uri)));
+        if (chunks.isEmpty()) return "\u0054\u0058\u0054 \u6717\u8bfb";
+        int index = Math.max(0, Math.min(chunks.size() - 1, progress * chunks.size() / 1001));
+        return "\u7b2c " + (index + 1) + " / " + chunks.size() + " \u6bb5";
+    }
+
+    private int readingProgressValue(String uri) {
+        if (uri == null || uri.isEmpty()) return 0;
+        List<String> chunks = splitTextForTts(readText(Uri.parse(uri)));
+        if (chunks.isEmpty()) return 0;
+        int index = Math.max(0, Math.min(prefs.getInt("ttsChunk:" + uri, 0), chunks.size() - 1));
+        return (int) Math.max(0, Math.min(1000, (index * 1000L) / Math.max(1, chunks.size() - 1)));
+    }
+
+    private void seekReadingByProgress(int progress) {
+        String uri = prefs.getString("lastTextUri", "");
+        if (uri == null || uri.isEmpty()) return;
+        List<String> chunks = splitTextForTts(readText(Uri.parse(uri)));
+        if (chunks.isEmpty()) return;
+        int index = Math.max(0, Math.min(chunks.size() - 1, progress * chunks.size() / 1001));
+        seekReadingChunk(index);
+    }
+
+    private void seekReadingByDelta(int delta) {
+        String uri = prefs.getString("lastTextUri", "");
+        if (uri == null || uri.isEmpty()) return;
+        List<String> chunks = splitTextForTts(readText(Uri.parse(uri)));
+        if (chunks.isEmpty()) return;
+        int current = Math.max(0, Math.min(prefs.getInt("ttsChunk:" + uri, 0), chunks.size() - 1));
+        seekReadingChunk(current + delta);
+    }
+
+    private void seekReadingChunk(int index) {
+        String uri = prefs.getString("lastTextUri", "");
+        if (uri == null || uri.isEmpty()) return;
+        List<String> chunks = splitTextForTts(readText(Uri.parse(uri)));
+        if (chunks.isEmpty()) return;
+        int safe = Math.max(0, Math.min(chunks.size() - 1, index));
+        prefs.edit()
+                .putInt("ttsChunk:" + uri, safe)
+                .putInt("ttsRangeStart:" + uri, 0)
+                .putInt("ttsRangeEnd:" + uri, 0)
+                .apply();
+        startService(new Intent(this, TextReaderService.class)
+                .setAction(TextReaderService.ACTION_SEEK_CHUNK)
+                .putExtra(TextReaderService.EXTRA_CHUNK_INDEX, safe));
+        updateUi();
+    }
+
+    private void sendTextReaderAction(String action) {
+        startService(new Intent(this, TextReaderService.class).setAction(action));
+    }
+
     private String nowPlayingBody(long positionMs) {
-        String timed = currentTimedText(currentMediaUri(), positionMs);
+        String mediaUri = currentMediaUri();
+        String timed = currentTimedText(mediaUri, positionMs);
         if (!timed.isEmpty()) return timed;
-        String reading = currentReadingChunk();
-        if (!reading.isEmpty()) return reading;
+        if (TextReaderService.isRunning() && (player == null || !player.isPlaying())) {
+            String reading = currentReadingChunk();
+            if (!reading.isEmpty()) return reading;
+        }
         if (player != null && player.getCurrentMediaItem() != null) {
             CharSequence t = player.getCurrentMediaItem().mediaMetadata.title;
-            return (t == null ? "洞听播放器" : t) + "\n暂无歌词/字幕";
+            return (t == null ? "洞听播放器" : t) + "\n暂无歌词";
         }
         return "耳朵在树洞里听见了声音";
     }
@@ -238,6 +373,122 @@ public class NowPlayingActivity extends AppCompatActivity {
         MediaItem item = player.getCurrentMediaItem();
         if (item.localConfiguration == null) return "";
         return item.localConfiguration.uri.toString();
+    }
+
+    private void showReadingCatalogDialog() {
+        String uri = prefs.getString("lastTextUri", "");
+        if (uri == null || uri.isEmpty()) return;
+        List<String> chunks = splitTextForTts(readText(Uri.parse(uri)));
+        if (chunks.isEmpty()) return;
+        List<Integer> targets = new ArrayList<>();
+        List<String> labels = new ArrayList<>();
+        for (int i = 0; i < chunks.size(); i++) {
+            String preview = chunkPreview(chunks.get(i));
+            if (looksLikeChapter(preview) || labels.size() < 80) {
+                targets.add(i);
+                labels.add((i + 1) + ". " + preview);
+            }
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("\u76ee\u5f55")
+                .setItems(labels.toArray(new String[0]), (dialog, which) -> seekReadingChunk(targets.get(which)))
+                .setNegativeButton("\u5173\u95ed", null)
+                .show();
+    }
+
+    private void addReadingBookmark() {
+        String uri = prefs.getString("lastTextUri", "");
+        if (uri == null || uri.isEmpty()) return;
+        int index = prefs.getInt("ttsChunk:" + uri, 0);
+        JSONArray array = loadReadingBookmarks(uri);
+        for (int i = 0; i < array.length(); i++) {
+            if (array.optInt(i, -1) == index) return;
+        }
+        array.put(index);
+        prefs.edit().putString("textMarks:" + uri, array.toString()).apply();
+    }
+
+    private void showReadingBookmarksDialog() {
+        String uri = prefs.getString("lastTextUri", "");
+        if (uri == null || uri.isEmpty()) return;
+        List<String> chunks = splitTextForTts(readText(Uri.parse(uri)));
+        JSONArray marks = loadReadingBookmarks(uri);
+        if (chunks.isEmpty() || marks.length() == 0) {
+            new AlertDialog.Builder(this)
+                    .setTitle("\u4e66\u7b7e")
+                    .setMessage("\u6682\u65e0\u4e66\u7b7e")
+                    .setPositiveButton("\u786e\u5b9a", null)
+                    .show();
+            return;
+        }
+        List<Integer> targets = new ArrayList<>();
+        List<String> labels = new ArrayList<>();
+        for (int i = 0; i < marks.length(); i++) {
+            int target = Math.max(0, Math.min(chunks.size() - 1, marks.optInt(i, 0)));
+            targets.add(target);
+            labels.add((target + 1) + ". " + chunkPreview(chunks.get(target)));
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("\u4e66\u7b7e")
+                .setItems(labels.toArray(new String[0]), (dialog, which) -> seekReadingChunk(targets.get(which)))
+                .setNeutralButton("\u6e05\u7a7a", (dialog, which) -> prefs.edit().remove("textMarks:" + uri).apply())
+                .setNegativeButton("\u5173\u95ed", null)
+                .show();
+    }
+
+    private void showReadingSearchDialog() {
+        String uri = prefs.getString("lastTextUri", "");
+        if (uri == null || uri.isEmpty()) return;
+        EditText input = new EditText(this);
+        input.setSingleLine(true);
+        input.setHint("\u8f93\u5165\u8981\u641c\u7d22\u7684\u6587\u5b57");
+        new AlertDialog.Builder(this)
+                .setTitle("\u641c\u7d22\u6587\u672c")
+                .setView(input)
+                .setPositiveButton("\u641c\u7d22", (dialog, which) -> showReadingSearchResults(uri, input.getText().toString()))
+                .setNegativeButton("\u53d6\u6d88", null)
+                .show();
+    }
+
+    private void showReadingSearchResults(String uri, String query) {
+        String q = query == null ? "" : query.trim();
+        if (q.isEmpty()) return;
+        List<String> chunks = splitTextForTts(readText(Uri.parse(uri)));
+        List<Integer> targets = new ArrayList<>();
+        List<String> labels = new ArrayList<>();
+        for (int i = 0; i < chunks.size() && labels.size() < 50; i++) {
+            if (chunks.get(i).contains(q)) {
+                targets.add(i);
+                labels.add((i + 1) + ". " + chunkPreview(chunks.get(i)));
+            }
+        }
+        if (labels.isEmpty()) labels.add("\u6ca1\u6709\u627e\u5230");
+        new AlertDialog.Builder(this)
+                .setTitle("\u641c\u7d22\u7ed3\u679c")
+                .setItems(labels.toArray(new String[0]), (dialog, which) -> {
+                    if (!targets.isEmpty()) seekReadingChunk(targets.get(which));
+                })
+                .setNegativeButton("\u5173\u95ed", null)
+                .show();
+    }
+
+    private JSONArray loadReadingBookmarks(String uri) {
+        try {
+            return new JSONArray(prefs.getString("textMarks:" + uri, "[]"));
+        } catch (JSONException ignored) {
+            return new JSONArray();
+        }
+    }
+
+    private boolean looksLikeChapter(String text) {
+        String value = text == null ? "" : text.trim();
+        return value.startsWith("\u7b2c") && (value.contains("\u7ae0") || value.contains("\u8282") || value.contains("\u56de"))
+                || value.startsWith("Chapter ") || value.startsWith("chapter ");
+    }
+
+    private String chunkPreview(String text) {
+        String value = text == null ? "" : text.replace('\n', ' ').trim();
+        return value.length() > 42 ? value.substring(0, 42) : value;
     }
 
     private String currentTimedText(String mediaUri, long positionMs) {
@@ -266,7 +517,28 @@ public class NowPlayingActivity extends AppCompatActivity {
         List<String> chunks = splitTextForTts(text);
         if (chunks.isEmpty()) return "";
         int index = Math.max(0, Math.min(prefs.getInt("ttsChunk:" + uri, 0), chunks.size() - 1));
-        return "朗读文字  " + (index + 1) + "/" + chunks.size() + "\n" + chunks.get(index);
+        int start = prefs.getInt("ttsRangeStart:" + uri, -1);
+        int end = prefs.getInt("ttsRangeEnd:" + uri, -1);
+        return readingWindowText(chunks, index, start, end);
+    }
+
+    private String readingWindowText(List<String> chunks, int index, int rangeStart, int rangeEnd) {
+        if (chunks == null || chunks.isEmpty()) return "";
+        index = Math.max(0, Math.min(index, chunks.size() - 1));
+        StringBuilder builder = new StringBuilder();
+        builder.append("朗读文字  ").append(index + 1).append("/").append(chunks.size()).append('\n');
+        builder.append("▶ ").append(readingCurrentPreview(chunks.get(index), rangeStart, rangeEnd));
+        return builder.toString();
+    }
+
+    private String readingCurrentPreview(String text, int rangeStart, int rangeEnd) {
+        String value = text == null ? "" : text.replace('\n', ' ').trim();
+        if (rangeStart < 0 || rangeStart >= value.length()) return value;
+        rangeEnd = Math.max(rangeStart + 1, Math.min(rangeEnd, value.length()));
+        String before = value.substring(0, rangeStart);
+        String current = value.substring(rangeStart, rangeEnd);
+        String after = value.substring(rangeEnd);
+        return before + "【" + current + "】" + after;
     }
 
     private List<String> splitTextForTts(String text) {
@@ -277,15 +549,16 @@ public class NowPlayingActivity extends AppCompatActivity {
             char ch = normalized.charAt(i);
             builder.append(ch);
             boolean boundary = ch == '\n' || ch == '。' || ch == '！' || ch == '？' || ch == '.' || ch == '!' || ch == '?';
-            if (builder.length() >= 350 && boundary) {
+            if (builder.length() >= 240 && boundary) {
                 chunks.add(builder.toString().trim());
                 builder.setLength(0);
-            } else if (builder.length() >= 700) {
+            } else if (builder.length() >= 480) {
                 chunks.add(builder.toString().trim());
                 builder.setLength(0);
             }
         }
         if (builder.length() > 0) chunks.add(builder.toString().trim());
+        if (chunks.isEmpty()) chunks.add(normalized);
         return chunks;
     }
 
