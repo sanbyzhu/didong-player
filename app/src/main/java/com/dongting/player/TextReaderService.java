@@ -22,12 +22,18 @@ import androidx.media3.common.C;
 import androidx.media3.common.MediaItem;
 import androidx.media3.exoplayer.ExoPlayer;
 
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Locale;
 import java.util.Set;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 public class TextReaderService extends Service implements TextToSpeech.OnInitListener {
     static final String ACTION_START = "com.dongting.player.TEXT_START";
@@ -293,15 +299,99 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
     }
 
     private String readText(Uri uri) {
+        if (isEpubUri(uri)) return readEpubText(uri);
         try (InputStream input = getContentResolver().openInputStream(uri);
              ByteArrayOutputStream output = new ByteArrayOutputStream()) {
             if (input == null) return "";
             byte[] buffer = new byte[4096];
             int read;
             while ((read = input.read(buffer)) != -1) output.write(buffer, 0, read);
-            return output.toString("UTF-8");
+            String text = output.toString("UTF-8");
+            return isJsonUri(uri) ? jsonToReadableText(text) : text;
         } catch (Exception ignored) {
             return "";
+        }
+    }
+
+    private boolean isJsonUri(Uri uri) {
+        String mime = getContentResolver().getType(uri);
+        String name = readDisplayName(uri).toLowerCase(Locale.ROOT);
+        return "application/json".equals(mime) || name.endsWith(".json");
+    }
+
+    private boolean isEpubUri(Uri uri) {
+        String mime = getContentResolver().getType(uri);
+        String name = readDisplayName(uri).toLowerCase(Locale.ROOT);
+        return "application/epub+zip".equals(mime) || name.endsWith(".epub");
+    }
+
+    private String readEpubText(Uri uri) {
+        StringBuilder text = new StringBuilder();
+        try (InputStream input = getContentResolver().openInputStream(uri);
+             ZipInputStream zip = new ZipInputStream(input)) {
+            ZipEntry entry;
+            byte[] buffer = new byte[4096];
+            while ((entry = zip.getNextEntry()) != null) {
+                String name = entry.getName().toLowerCase(Locale.ROOT);
+                if (entry.isDirectory() || !(name.endsWith(".xhtml") || name.endsWith(".html") || name.endsWith(".htm") || name.endsWith(".txt"))) {
+                    continue;
+                }
+                ByteArrayOutputStream output = new ByteArrayOutputStream();
+                int read;
+                while ((read = zip.read(buffer)) != -1) output.write(buffer, 0, read);
+                text.append('\n').append(stripHtml(output.toString("UTF-8")));
+            }
+        } catch (Exception ignored) {
+        }
+        return text.toString().trim();
+    }
+
+    private String stripHtml(String html) {
+        return html.replaceAll("(?is)<script.*?</script>", " ")
+                .replaceAll("(?is)<style.*?</style>", " ")
+                .replaceAll("(?i)<br\\s*/?>", "\n")
+                .replaceAll("(?i)</p>|</h[1-6]>|</div>|</li>", "\n")
+                .replaceAll("<[^>]+>", " ")
+                .replace("&nbsp;", " ")
+                .replace("&amp;", "&")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replaceAll("[ \\t\\x0B\\f\\r]+", " ")
+                .replaceAll("\\n{3,}", "\n\n")
+                .trim();
+    }
+
+    private String jsonToReadableText(String raw) {
+        StringBuilder builder = new StringBuilder();
+        try {
+            String trimmed = raw.trim();
+            Object root = trimmed.startsWith("[") ? new JSONArray(trimmed) : new JSONObject(trimmed);
+            appendJsonValue(builder, root, "");
+            String result = builder.toString().trim();
+            return result.isEmpty() ? raw : result;
+        } catch (JSONException ignored) {
+            return raw;
+        }
+    }
+
+    private void appendJsonValue(StringBuilder builder, Object value, String prefix) throws JSONException {
+        if (value instanceof JSONObject) {
+            JSONObject object = (JSONObject) value;
+            JSONArray names = object.names();
+            if (names == null) return;
+            for (int i = 0; i < names.length(); i++) {
+                String key = names.getString(i);
+                appendJsonValue(builder, object.get(key), key);
+            }
+        } else if (value instanceof JSONArray) {
+            JSONArray array = (JSONArray) value;
+            for (int i = 0; i < array.length(); i++) appendJsonValue(builder, array.get(i), prefix);
+        } else if (value != null && value != JSONObject.NULL) {
+            String text = String.valueOf(value).trim();
+            if (!text.isEmpty()) {
+                if (!prefix.isEmpty()) builder.append(prefix).append("：");
+                builder.append(text).append('\n');
+            }
         }
     }
 

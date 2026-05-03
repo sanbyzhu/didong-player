@@ -2,6 +2,7 @@ package com.dongting.player;
 
 import android.Manifest;
 import android.app.AlertDialog;
+import android.app.PictureInPictureParams;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.ContentResolver;
@@ -9,6 +10,7 @@ import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
+import android.content.res.Configuration;
 import android.database.Cursor;
 import android.media.audiofx.LoudnessEnhancer;
 import android.media.audiofx.BassBoost;
@@ -41,6 +43,7 @@ import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import android.view.WindowManager;
+import android.util.Rational;
 import android.widget.AdapterView;
 import android.widget.ArrayAdapter;
 import android.widget.Button;
@@ -76,6 +79,7 @@ import org.json.JSONObject;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
+import java.io.OutputStream;
 import java.text.Collator;
 import java.util.ArrayList;
 import java.util.Collections;
@@ -88,6 +92,8 @@ import java.util.Random;
 import java.util.Set;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 public class MainActivity extends AppCompatActivity implements TextToSpeech.OnInitListener {
     private static final String PREFS = "dongting_player";
@@ -169,6 +175,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private boolean abEnabled = false;
     private boolean draggingPosition = false;
     private boolean fullScreenVideo = false;
+    private boolean pictureInPictureVideo = false;
     private boolean advancedVisible = false;
     private boolean scanning = false;
     private boolean suppressPositionSave = false;
@@ -250,6 +257,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     importedTextKey = uri.toString();
                     currentTextChunk = prefs.getInt("ttsChunk:" + importedTextKey, 0);
                     textChunks.clear();
+                    rememberTextBook(uri, displayName(uri));
                     prefs.edit().putString("lastTextUri", importedTextKey).apply();
                     status("已导入文本：" + importedText.length() + " 字，进度已恢复到第 " + (currentTextChunk + 1) + " 段");
                     updateVisualStage();
@@ -279,6 +287,26 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     } catch (SecurityException ignored) {
                     }
                     importTimedText(uri);
+                }
+            });
+
+    private final ActivityResultLauncher<Intent> backupExporter =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+                if (result.getResultCode() == RESULT_OK && result.getData() != null && result.getData().getData() != null) {
+                    exportBackup(result.getData().getData());
+                }
+            });
+
+    private final ActivityResultLauncher<Intent> backupImporter =
+            registerForActivityResult(new ActivityResultContracts.StartActivityForResult(), result -> {
+                if (result.getResultCode() == RESULT_OK && result.getData() != null && result.getData().getData() != null) {
+                    Uri uri = result.getData().getData();
+                    int flags = result.getData().getFlags() & Intent.FLAG_GRANT_READ_URI_PERMISSION;
+                    try {
+                        getContentResolver().takePersistableUriPermission(uri, flags);
+                    } catch (SecurityException ignored) {
+                    }
+                    importBackup(uri);
                 }
             });
 
@@ -335,6 +363,15 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         try {
             database.remove(key);
         } catch (RuntimeException ignored) {
+        }
+    }
+
+    private int dbRemovePrefix(String prefix) {
+        if (database == null) return 0;
+        try {
+            return database.removePrefix(prefix);
+        } catch (RuntimeException ignored) {
+            return 0;
         }
     }
 
@@ -696,6 +733,12 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 btn("男声优先", v -> preferMaleVoice())
         ));
         controls.addView(row(
+                btn("TXT书架", v -> showTextBookshelf()),
+                btn("扫描历史", v -> showScanHistoryDialog()),
+                btn("设备自检", v -> showDeviceCheckDialog()),
+                btn("数据备份", v -> showBackupDialog())
+        ));
+        controls.addView(row(
                 btn("背景音乐", v -> pickBackground()),
                 btn("视频全屏", v -> enterVideoFullScreen()),
                 btn("系统TTS", v -> openTtsSettings()),
@@ -856,8 +899,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     showVideoController();
                 }),
                 btn("适应/填充", v -> {
-                    boolean fill = !prefs.getBoolean("videoFillScreen", false);
-                    prefs.edit().putBoolean("videoFillScreen", fill).apply();
+                    MediaEntry entry = currentEntry();
+                    String key = entry == null ? "videoFillScreen" : "videoFillScreen:" + entry.uri;
+                    boolean fill = !prefs.getBoolean(key, prefs.getBoolean("videoFillScreen", false));
+                    prefs.edit().putBoolean(key, fill).apply();
+                    if (entry != null) dbPut(key, String.valueOf(fill));
                     applyVideoResizeMode();
                     status(fill ? "视频全屏：填充画面" : "视频全屏：完整适应");
                     showVideoController();
@@ -878,6 +924,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                     rotateVideo();
                     showVideoController();
                 }),
+                btn("小窗", v -> enterPictureInPicture()),
                 btn("退出", v -> {
                     if (fullScreenVideo) toggleFullScreenVideo();
                 })
@@ -1028,6 +1075,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             status("无法读取该文件夹");
             return;
         }
+        rememberScanFolder(folderUri, root.getName() == null ? "本地文件夹" : root.getName());
         scanning = true;
         scannedFileCount = 0;
         scannedDirCount = 0;
@@ -1246,6 +1294,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             return;
         }
         suppressPositionSave = false;
+        prepareLayoutForEntry(entry);
         nowPlaying.setText(entry.title + "\n" + entry.folderName);
         if (player.getMediaItemCount() != queue.size()) syncPlayerQueue();
         player.seekTo(index, 0);
@@ -1718,7 +1767,11 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private void updateTimedTextUi(long positionMs) {
         String line = currentTimedText(positionMs);
-        if (videoSubtitleLabel != null) videoSubtitleLabel.setText(line);
+        if (videoSubtitleLabel != null) {
+            videoSubtitleLabel.setText(line);
+            videoSubtitleLabel.setTextSize(prefs.getInt("subtitleTextSize", 14));
+            videoSubtitleLabel.setTextColor(prefs.getBoolean("lyricHighlight", true) ? 0xFFFFD36A : COLOR_TEXT);
+        }
     }
 
     private void rotateVideo() {
@@ -1729,15 +1782,22 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             playerView.setScaleX(scale);
             playerView.setScaleY(scale);
         }
+        MediaEntry entry = currentEntry();
+        if (entry != null) {
+            prefs.edit().putInt("videoRotation:" + entry.uri, videoRotation).apply();
+            dbPut("videoRotation:" + entry.uri, String.valueOf(videoRotation));
+        }
         status("视频旋转：" + videoRotation + "°");
     }
 
     private void resetVideoTransform() {
-        videoRotation = 0;
+        MediaEntry entry = currentEntry();
+        videoRotation = entry == null ? 0 : getStoredInt("videoRotation:" + entry.uri, 0);
         if (playerView != null) {
-            playerView.setRotation(0f);
-            playerView.setScaleX(1f);
-            playerView.setScaleY(1f);
+            playerView.setRotation(videoRotation);
+            float scale = videoRotation == 90 || videoRotation == 270 ? 0.72f : 1f;
+            playerView.setScaleX(scale);
+            playerView.setScaleY(scale);
         }
     }
 
@@ -1773,11 +1833,35 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         }
         String sidecar = prefs.getString("timedSidecar:" + entry.uri, dbGet("timedSidecar:" + entry.uri, ""));
         String message = "歌词/字幕：" + timedTextLines.size() + " 行\n偏移：" + formatSignedMs(timedTextOffsetMs)
+                + "\n字号：" + prefs.getInt("subtitleTextSize", 14)
+                + "\n高亮：" + (prefs.getBoolean("lyricHighlight", true) ? "开启" : "关闭")
                 + (sidecar.isEmpty() ? "\n未绑定外部文件" : "\n已绑定外部文件");
         new AlertDialog.Builder(this)
                 .setTitle("歌词/字幕状态")
                 .setMessage(message)
-                .setPositiveButton("确定", null)
+                .setPositiveButton("样式", (dialog, which) -> showTimedTextStyleDialog())
+                .setNegativeButton("确定", null)
+                .show();
+    }
+
+    private void showTimedTextStyleDialog() {
+        String[] options = {"字幕小", "字幕中", "字幕大", "切换高亮当前行"};
+        new AlertDialog.Builder(this)
+                .setTitle("字幕/歌词样式")
+                .setItems(options, (dialog, which) -> {
+                    if (which <= 2) {
+                        int size = which == 0 ? 13 : which == 1 ? 16 : 20;
+                        prefs.edit().putInt("subtitleTextSize", size).apply();
+                        if (videoSubtitleLabel != null) videoSubtitleLabel.setTextSize(size);
+                        status("字幕字号：" + size);
+                    } else {
+                        boolean enabled = !prefs.getBoolean("lyricHighlight", true);
+                        prefs.edit().putBoolean("lyricHighlight", enabled).apply();
+                        status(enabled ? "已开启歌词高亮" : "已关闭歌词高亮");
+                    }
+                    updateTimedTextUi(player == null ? 0 : player.getCurrentPosition());
+                    updateVisualStage();
+                })
                 .show();
     }
 
@@ -1829,6 +1913,89 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             return;
         }
         if (!fullScreenVideo) toggleFullScreenVideo();
+    }
+
+    private void enterPictureInPicture() {
+        MediaEntry entry = currentEntry();
+        if (entry == null || !"video".equals(entry.type)) {
+            status("当前不是视频");
+            return;
+        }
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) {
+            status("当前系统不支持画中画");
+            return;
+        }
+        try {
+            setPictureInPictureVideoLayout(true);
+            PictureInPictureParams params = new PictureInPictureParams.Builder()
+                    .setAspectRatio(new Rational(9, 16))
+                    .build();
+            enterPictureInPictureMode(params);
+            status("已尝试进入视频小窗");
+        } catch (RuntimeException ex) {
+            setPictureInPictureVideoLayout(false);
+            status("进入小窗失败：" + ex.getMessage());
+        }
+    }
+
+    private void setPictureInPictureVideoLayout(boolean enabled) {
+        if (rootLayout == null || playerView == null) return;
+        pictureInPictureVideo = enabled;
+        for (int i = 0; i < rootLayout.getChildCount(); i++) {
+            View child = rootLayout.getChildAt(i);
+            child.setVisibility(enabled ? (child == playerView ? View.VISIBLE : View.GONE) : View.VISIBLE);
+        }
+        if (videoControlBar != null) videoControlBar.setVisibility(enabled ? View.GONE : View.VISIBLE);
+        if (visualView != null) visualView.setVisibility(View.GONE);
+        ViewGroup.LayoutParams rawParams = playerView.getLayoutParams();
+        if (rawParams instanceof LinearLayout.LayoutParams) {
+            LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) rawParams;
+            params.height = enabled ? 0 : dp(210);
+            params.weight = enabled ? 1f : 0f;
+            playerView.setLayoutParams(params);
+        } else {
+            rawParams.height = enabled ? ViewGroup.LayoutParams.MATCH_PARENT : dp(210);
+            playerView.setLayoutParams(rawParams);
+        }
+        rootLayout.setPadding(enabled ? 0 : dp(10), enabled ? 0 : dp(10), enabled ? 0 : dp(10), enabled ? 0 : dp(10));
+        applyVideoResizeMode();
+    }
+
+    private void prepareLayoutForEntry(@Nullable MediaEntry entry) {
+        boolean isVideo = entry != null && "video".equals(entry.type);
+        if (isVideo) {
+            if (pictureInPictureVideo && Build.VERSION.SDK_INT >= Build.VERSION_CODES.N && !isInPictureInPictureMode()) {
+                setPictureInPictureVideoLayout(false);
+            }
+            return;
+        }
+        pictureInPictureVideo = false;
+        if (fullScreenVideo) {
+            toggleFullScreenVideo();
+        } else {
+            restoreEmbeddedPlayerLayout();
+        }
+        handler.removeCallbacks(hideVideoControls);
+    }
+
+    private void restoreEmbeddedPlayerLayout() {
+        if (rootLayout == null || playerView == null) return;
+        for (int i = 0; i < rootLayout.getChildCount(); i++) {
+            rootLayout.getChildAt(i).setVisibility(View.VISIBLE);
+        }
+        ViewGroup.LayoutParams rawParams = playerView.getLayoutParams();
+        if (rawParams instanceof LinearLayout.LayoutParams) {
+            LinearLayout.LayoutParams params = (LinearLayout.LayoutParams) rawParams;
+            params.height = dp(210);
+            params.weight = 0f;
+            playerView.setLayoutParams(params);
+        } else {
+            rawParams.height = dp(210);
+            playerView.setLayoutParams(rawParams);
+        }
+        rootLayout.setPadding(dp(10), dp(10), dp(10), dp(10));
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+        getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
     }
 
     private void adjustSystemVolume(int direction) {
@@ -1901,7 +2068,10 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private void applyVideoResizeMode() {
         if (playerView == null) return;
-        boolean fill = prefs.getBoolean("videoFillScreen", false);
+        MediaEntry entry = currentEntry();
+        boolean fill = entry == null
+                ? prefs.getBoolean("videoFillScreen", false)
+                : prefs.getBoolean("videoFillScreen:" + entry.uri, prefs.getBoolean("videoFillScreen", false));
         playerView.setResizeMode(fullScreenVideo && fill
                 ? AspectRatioFrameLayout.RESIZE_MODE_ZOOM
                 : AspectRatioFrameLayout.RESIZE_MODE_FIT);
@@ -1921,6 +2091,12 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
     private void updateVideoControlVisibility() {
         if (videoControlBar == null) return;
+        if (pictureInPictureVideo) {
+            if (playerView != null) playerView.setVisibility(View.VISIBLE);
+            if (visualView != null) visualView.setVisibility(View.GONE);
+            videoControlBar.setVisibility(View.GONE);
+            return;
+        }
         MediaEntry entry = currentEntry();
         boolean isVideo = entry != null && "video".equals(entry.type);
         if (visualView != null) visualView.setVisibility(isVideo || fullScreenVideo ? View.GONE : View.VISIBLE);
@@ -2350,27 +2526,31 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void showPlaylistManager() {
-        String[] options = {"刷新上次文件夹", "按数字/名称排序当前列表", "倒序当前列表", "清理当前列表失效文件", "全库清理失效文件", "批量操作当前列表", "把扫描结果加入当前列表", "重命名当前列表", "删除当前列表", "清空最近播放"};
+        String[] options = {"刷新上次文件夹", "最近扫描文件夹", "增量刷新当前列表", "按数字/名称排序当前列表", "倒序当前列表", "清理当前列表失效文件", "全库清理失效文件", "批量操作当前列表", "把扫描结果加入当前列表", "重命名当前列表", "删除当前列表", "清空最近播放"};
         new AlertDialog.Builder(this)
                 .setTitle("列表管理：" + selectedPlaylist)
                 .setItems(options, (dialog, which) -> {
                     if (which == 0) {
                         refreshLastFolder();
                     } else if (which == 1) {
-                        sortCurrentPlaylist(false);
+                        showScanHistoryDialog();
                     } else if (which == 2) {
-                        sortCurrentPlaylist(true);
+                        incrementalRefreshCurrentPlaylist();
                     } else if (which == 3) {
-                        cleanUnavailableFromCurrentPlaylist();
+                        sortCurrentPlaylist(false);
                     } else if (which == 4) {
-                        cleanUnavailableFromAllPlaylists();
+                        sortCurrentPlaylist(true);
                     } else if (which == 5) {
-                        showPlaylistBulkActions();
+                        cleanUnavailableFromCurrentPlaylist();
                     } else if (which == 6) {
-                        addLibraryToPlaylist();
+                        cleanUnavailableFromAllPlaylists();
                     } else if (which == 7) {
-                        renameCurrentPlaylist();
+                        showPlaylistBulkActions();
                     } else if (which == 8) {
+                        addLibraryToPlaylist();
+                    } else if (which == 9) {
+                        renameCurrentPlaylist();
+                    } else if (which == 10) {
                         deleteCurrentPlaylist();
                     } else {
                         clearRecentPlaylist();
@@ -2386,6 +2566,39 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             return;
         }
         scanFolder(Uri.parse(raw));
+    }
+
+    private void showScanHistoryDialog() {
+        List<NamedUri> folders = loadNamedUriList("scanFolders");
+        if (folders.isEmpty()) {
+            status("还没有扫描历史");
+            return;
+        }
+        String[] labels = new String[folders.size()];
+        for (int i = 0; i < folders.size(); i++) labels[i] = folders.get(i).name;
+        new AlertDialog.Builder(this)
+                .setTitle("最近扫描文件夹")
+                .setItems(labels, (dialog, which) -> scanFolder(Uri.parse(folders.get(which).uri)))
+                .setNegativeButton("清空历史", (dialog, which) -> {
+                    prefs.edit().remove("scanFolders").apply();
+                    dbRemove("scanFolders");
+                    status("已清空扫描历史");
+                })
+                .show();
+    }
+
+    private void rememberScanFolder(Uri uri, String name) {
+        rememberNamedUri("scanFolders", name, uri.toString(), 8);
+        prefs.edit().putString("lastFolder", uri.toString()).apply();
+        dbPut("lastFolder", uri.toString());
+    }
+
+    private void incrementalRefreshCurrentPlaylist() {
+        int removed = 0;
+        List<MediaEntry> items = playlists.get(selectedPlaylist);
+        if (items != null) removed = removeUnavailableEntries(items);
+        refreshLastFolder();
+        status("已开始增量刷新，先清理失效文件：" + removed + " 个");
     }
 
     private void sortCurrentPlaylist(boolean reverse) {
@@ -2725,6 +2938,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
 
         currentIndex = restoredIndex;
         MediaEntry entry = items.get(currentIndex);
+        prepareLayoutForEntry(entry);
         nowPlaying.setText(entry.title + "\n" + entry.folderName);
         setQueue(items, false);
         long last = getStoredLong("pos:" + entry.uri, 0);
@@ -2931,6 +3145,44 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         }
     }
 
+    private List<NamedUri> loadNamedUriList(String key) {
+        List<NamedUri> items = new ArrayList<>();
+        String raw = prefs.getString(key, dbGet(key, "[]"));
+        try {
+            JSONArray array = new JSONArray(raw);
+            for (int i = 0; i < array.length(); i++) {
+                JSONObject obj = array.getJSONObject(i);
+                String uri = obj.optString("uri", "");
+                if (uri.isEmpty()) continue;
+                items.add(new NamedUri(obj.optString("name", uri), uri));
+            }
+        } catch (JSONException ignored) {
+        }
+        return items;
+    }
+
+    private void rememberNamedUri(String key, String name, String uri, int limit) {
+        List<NamedUri> items = loadNamedUriList(key);
+        for (int i = items.size() - 1; i >= 0; i--) {
+            if (items.get(i).uri.equals(uri)) items.remove(i);
+        }
+        items.add(0, new NamedUri(name == null || name.trim().isEmpty() ? uri : name, uri));
+        while (items.size() > limit) items.remove(items.size() - 1);
+        JSONArray array = new JSONArray();
+        for (NamedUri item : items) {
+            JSONObject obj = new JSONObject();
+            try {
+                obj.put("name", item.name);
+                obj.put("uri", item.uri);
+                array.put(obj);
+            } catch (JSONException ignored) {
+            }
+        }
+        String payload = array.toString();
+        prefs.edit().putString(key, payload).apply();
+        dbPut(key, payload);
+    }
+
     private void refreshPlaylistSpinner() {
         List<String> names = new ArrayList<>(playlists.keySet());
         Collections.sort(names, collator);
@@ -3057,7 +3309,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private void pickText() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("text/*");
+        intent.setType("*/*");
+        intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[]{"text/*", "application/json", "application/epub+zip", "application/octet-stream"});
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
         textPicker.launch(intent);
     }
 
@@ -3165,6 +3419,44 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 })
                 .setNegativeButton("取消", null)
                 .show();
+    }
+
+    private void showTextBookshelf() {
+        List<NamedUri> books = loadNamedUriList("textBooks");
+        if (books.isEmpty()) {
+            status("书架还是空的，请先导入 TXT");
+            pickText();
+            return;
+        }
+        String[] labels = new String[books.size()];
+        for (int i = 0; i < books.size(); i++) {
+            NamedUri book = books.get(i);
+            int chunk = prefs.getInt("ttsChunk:" + book.uri, 0);
+            labels[i] = book.name + " · 第 " + (chunk + 1) + " 段";
+        }
+        new AlertDialog.Builder(this)
+                .setTitle("TXT 书架")
+                .setItems(labels, (dialog, which) -> openTextBook(books.get(which)))
+                .setNegativeButton("清空书架", (dialog, which) -> {
+                    prefs.edit().remove("textBooks").apply();
+                    dbRemove("textBooks");
+                    status("TXT 书架已清空");
+                })
+                .show();
+    }
+
+    private void openTextBook(NamedUri book) {
+        importedTextKey = book.uri;
+        importedText = readText(Uri.parse(book.uri));
+        currentTextChunk = prefs.getInt("ttsChunk:" + importedTextKey, 0);
+        textChunks.clear();
+        prefs.edit().putString("lastTextUri", importedTextKey).apply();
+        status("已打开书架文本：" + book.name);
+        updateVisualStage();
+    }
+
+    private void rememberTextBook(Uri uri, String name) {
+        rememberNamedUri("textBooks", name, uri.toString(), 50);
     }
 
     private void showTextChaptersDialog() {
@@ -3434,6 +3726,50 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         status("朗读进度已回到开头");
     }
 
+    private void showDeviceCheckDialog() {
+        StringBuilder message = new StringBuilder();
+        message.append("后台播放：").append(playbackService != null ? "服务已连接" : "等待服务连接").append('\n');
+        message.append("通知栏权限：").append(Build.VERSION.SDK_INT < 33 || checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == android.content.pm.PackageManager.PERMISSION_GRANTED ? "已允许" : "未允许").append('\n');
+        message.append("MediaSession：").append(mediaSession != null ? "已启用" : "未连接").append('\n');
+        message.append("音效会话：").append(player != null && player.getAudioSessionId() != C.AUDIO_SESSION_ID_UNSET ? player.getAudioSessionId() : "等待播放").append('\n');
+        message.append("低音增强：").append(bassBoost != null && bassBoost.hasControl() ? "可控" : "可能受设备限制").append('\n');
+        message.append("立体增强：").append(virtualizer != null && virtualizer.hasControl() ? "可控" : "可能受设备限制").append('\n');
+        message.append("均衡器：").append(equalizer != null && equalizer.hasControl() ? "可控" : "可能受设备限制").append('\n');
+        message.append("画中画：").append(Build.VERSION.SDK_INT >= Build.VERSION_CODES.O ? "系统支持" : "系统不支持").append('\n');
+        message.append("TTS：").append(tts == null ? "初始化中" : "已初始化").append('\n');
+        message.append("数据库镜像：").append(database == null ? "未连接" : "已启用");
+        new AlertDialog.Builder(this)
+                .setTitle("设备体验自检")
+                .setMessage(message.toString())
+                .setPositiveButton("刷新音效", (dialog, which) -> attachLoudnessEnhancer())
+                .setNegativeButton("确定", null)
+                .show();
+    }
+
+    private void showBackupDialog() {
+        String[] options = {"导出备份", "导入备份", "查看数据统计"};
+        new AlertDialog.Builder(this)
+                .setTitle("数据备份")
+                .setItems(options, (dialog, which) -> {
+                    if (which == 0) {
+                        Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
+                        intent.addCategory(Intent.CATEGORY_OPENABLE);
+                        intent.setType("application/json");
+                        intent.putExtra(Intent.EXTRA_TITLE, "dongting-backup-v0.0.10.json");
+                        backupExporter.launch(intent);
+                    } else if (which == 1) {
+                        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                        intent.addCategory(Intent.CATEGORY_OPENABLE);
+                        intent.setType("application/json");
+                        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+                        backupImporter.launch(intent);
+                    } else {
+                        showDataStatsDialog();
+                    }
+                })
+                .show();
+    }
+
     private void pickBackground() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
@@ -3450,6 +3786,13 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private String readText(Uri uri) {
+        if (isEpubUri(uri)) return readEpubText(uri);
+        String text = readRawText(uri);
+        if (text.isEmpty()) return "";
+        return isJsonUri(uri) ? jsonToReadableText(text) : text;
+    }
+
+    private String readRawText(Uri uri) {
         try (InputStream input = getContentResolver().openInputStream(uri);
              ByteArrayOutputStream output = new ByteArrayOutputStream()) {
             if (input == null) return "";
@@ -3461,6 +3804,183 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             status("读取文本失败：" + ex.getMessage());
             return "";
         }
+    }
+
+    private boolean isJsonUri(Uri uri) {
+        String mime = getContentResolver().getType(uri);
+        String name = displayName(uri).toLowerCase(Locale.ROOT);
+        return "application/json".equals(mime) || name.endsWith(".json");
+    }
+
+    private boolean isEpubUri(Uri uri) {
+        String mime = getContentResolver().getType(uri);
+        String name = displayName(uri).toLowerCase(Locale.ROOT);
+        return "application/epub+zip".equals(mime) || name.endsWith(".epub");
+    }
+
+    private String readEpubText(Uri uri) {
+        StringBuilder text = new StringBuilder();
+        try (InputStream input = getContentResolver().openInputStream(uri);
+             ZipInputStream zip = new ZipInputStream(input)) {
+            ZipEntry entry;
+            byte[] buffer = new byte[4096];
+            while ((entry = zip.getNextEntry()) != null) {
+                String name = entry.getName().toLowerCase(Locale.ROOT);
+                if (entry.isDirectory() || !(name.endsWith(".xhtml") || name.endsWith(".html") || name.endsWith(".htm") || name.endsWith(".txt"))) {
+                    continue;
+                }
+                ByteArrayOutputStream output = new ByteArrayOutputStream();
+                int read;
+                while ((read = zip.read(buffer)) != -1) output.write(buffer, 0, read);
+                text.append('\n').append(stripHtml(output.toString("UTF-8")));
+            }
+        } catch (Exception ex) {
+            status("读取 EPUB 失败：" + ex.getMessage());
+        }
+        return text.toString().trim();
+    }
+
+    private String stripHtml(String html) {
+        return html.replaceAll("(?is)<script.*?</script>", " ")
+                .replaceAll("(?is)<style.*?</style>", " ")
+                .replaceAll("(?i)<br\\s*/?>", "\n")
+                .replaceAll("(?i)</p>|</h[1-6]>|</div>|</li>", "\n")
+                .replaceAll("<[^>]+>", " ")
+                .replace("&nbsp;", " ")
+                .replace("&amp;", "&")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replaceAll("[ \\t\\x0B\\f\\r]+", " ")
+                .replaceAll("\\n{3,}", "\n\n")
+                .trim();
+    }
+
+    private String jsonToReadableText(String raw) {
+        StringBuilder builder = new StringBuilder();
+        try {
+            String trimmed = raw.trim();
+            Object root = trimmed.startsWith("[") ? new JSONArray(trimmed) : new JSONObject(trimmed);
+            appendJsonValue(builder, root, "");
+            String result = builder.toString().trim();
+            return result.isEmpty() ? raw : result;
+        } catch (JSONException ignored) {
+            return raw;
+        }
+    }
+
+    private void appendJsonValue(StringBuilder builder, Object value, String prefix) throws JSONException {
+        if (value instanceof JSONObject) {
+            JSONObject object = (JSONObject) value;
+            JSONArray names = object.names();
+            if (names == null) return;
+            for (int i = 0; i < names.length(); i++) {
+                String key = names.getString(i);
+                appendJsonValue(builder, object.get(key), key);
+            }
+        } else if (value instanceof JSONArray) {
+            JSONArray array = (JSONArray) value;
+            for (int i = 0; i < array.length(); i++) appendJsonValue(builder, array.get(i), prefix);
+        } else if (value != null && value != JSONObject.NULL) {
+            String text = String.valueOf(value).trim();
+            if (!text.isEmpty()) {
+                if (!prefix.isEmpty()) builder.append(prefix).append("：");
+                builder.append(text).append('\n');
+            }
+        }
+    }
+
+    private void writeText(Uri uri, String text) {
+        try (OutputStream output = getContentResolver().openOutputStream(uri)) {
+            if (output == null) {
+                status("无法写入备份文件");
+                return;
+            }
+            output.write(text.getBytes("UTF-8"));
+            output.flush();
+            status("备份已导出");
+        } catch (Exception ex) {
+            status("导出备份失败：" + ex.getMessage());
+        }
+    }
+
+    private void exportBackup(Uri uri) {
+        JSONObject root = new JSONObject();
+        JSONObject prefObj = new JSONObject();
+        JSONObject dbObj = new JSONObject();
+        try {
+            for (Map.Entry<String, ?> entry : prefs.getAll().entrySet()) {
+                Object value = entry.getValue();
+                if (value instanceof String || value instanceof Number || value instanceof Boolean) {
+                    prefObj.put(entry.getKey(), value);
+                }
+            }
+            if (database != null) {
+                for (Map.Entry<String, String> entry : database.all().entrySet()) dbObj.put(entry.getKey(), entry.getValue());
+            }
+            root.put("app", "洞听播放器");
+            root.put("version", "0.0.10");
+            root.put("exportedAt", System.currentTimeMillis());
+            root.put("prefs", prefObj);
+            root.put("db", dbObj);
+            writeText(uri, root.toString(2));
+        } catch (JSONException ex) {
+            status("生成备份失败：" + ex.getMessage());
+        }
+    }
+
+    private void importBackup(Uri uri) {
+        try {
+            JSONObject root = new JSONObject(readRawText(uri));
+            JSONObject prefObj = root.optJSONObject("prefs");
+            if (prefObj != null) {
+                SharedPreferences.Editor editor = prefs.edit();
+                JSONArray names = prefObj.names();
+                if (names != null) {
+                    for (int i = 0; i < names.length(); i++) {
+                        String key = names.getString(i);
+                        Object value = prefObj.get(key);
+                        if (value instanceof Boolean) editor.putBoolean(key, (Boolean) value);
+                        else if (value instanceof Integer) editor.putInt(key, (Integer) value);
+                        else if (value instanceof Long) editor.putLong(key, (Long) value);
+                        else if (value instanceof Double) editor.putFloat(key, ((Double) value).floatValue());
+                        else editor.putString(key, String.valueOf(value));
+                    }
+                }
+                editor.apply();
+            }
+            JSONObject dbObj = root.optJSONObject("db");
+            if (dbObj != null) {
+                JSONArray names = dbObj.names();
+                if (names != null) {
+                    for (int i = 0; i < names.length(); i++) {
+                        String key = names.getString(i);
+                        dbPut(key, dbObj.optString(key, ""));
+                    }
+                }
+            }
+            loadPlaylists();
+            status("备份已导入，播放列表和记忆已刷新");
+        } catch (JSONException ex) {
+            status("导入备份失败：文件格式不正确");
+        }
+    }
+
+    private void showDataStatsDialog() {
+        int dbCount = database == null ? 0 : database.all().size();
+        int playlistCount = playlists.size();
+        int mediaCount = 0;
+        for (List<MediaEntry> items : playlists.values()) mediaCount += items.size();
+        String message = "播放列表：" + playlistCount
+                + "\n列表项合计：" + mediaCount
+                + "\nSharedPreferences：" + prefs.getAll().size()
+                + "\n数据库镜像：" + dbCount
+                + "\nTXT 书架：" + loadNamedUriList("textBooks").size()
+                + "\n扫描历史：" + loadNamedUriList("scanFolders").size();
+        new AlertDialog.Builder(this)
+                .setTitle("数据统计")
+                .setMessage(message)
+                .setPositiveButton("确定", null)
+                .show();
     }
 
     private void restoreImportedText() {
@@ -3582,21 +4102,25 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     private void showSettingsDialog() {
-        String[] options = {"设置中心", "系统声音设置", "恢复音效默认", "恢复朗读默认", "朗读从头开始", "清除当前播放位置", "关闭所有睡眠定时"};
+        String[] options = {"设置中心", "设备体验自检", "数据备份/恢复", "系统声音设置", "恢复音效默认", "恢复朗读默认", "朗读从头开始", "清除当前播放位置", "关闭所有睡眠定时"};
         new AlertDialog.Builder(this)
                 .setTitle("设置")
                 .setItems(options, (dialog, which) -> {
                     if (which == 0) {
                         startActivity(new Intent(this, SettingsActivity.class));
                     } else if (which == 1) {
-                        openAndroidSoundSettings();
+                        showDeviceCheckDialog();
                     } else if (which == 2) {
-                        resetAudioEffects();
+                        showBackupDialog();
                     } else if (which == 3) {
-                        resetTtsSettings();
+                        openAndroidSoundSettings();
                     } else if (which == 4) {
-                        resetTextProgress();
+                        resetAudioEffects();
                     } else if (which == 5) {
+                        resetTtsSettings();
+                    } else if (which == 6) {
+                        resetTextProgress();
+                    } else if (which == 7) {
                         clearCurrentPosition();
                     } else {
                         handler.removeCallbacks(sleepTimer);
@@ -4005,6 +4529,23 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     }
 
     @Override
+    public void onPictureInPictureModeChanged(boolean isInPictureInPictureMode, Configuration newConfig) {
+        super.onPictureInPictureModeChanged(isInPictureInPictureMode, newConfig);
+        if (isInPictureInPictureMode) {
+            setPictureInPictureVideoLayout(true);
+        } else if (pictureInPictureVideo) {
+            pictureInPictureVideo = false;
+            fullScreenVideo = false;
+            setPictureInPictureVideoLayout(false);
+            setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+            getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+            updateVideoControlVisibility();
+            showVideoController();
+            status("已恢复视频窗口");
+        }
+    }
+
+    @Override
     protected void onDestroy() {
         super.onDestroy();
         handler.removeCallbacksAndMessages(null);
@@ -4053,6 +4594,16 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         TextChapter(String title, int chunkIndex) {
             this.title = title == null ? "" : title;
             this.chunkIndex = Math.max(0, chunkIndex);
+        }
+    }
+
+    private static class NamedUri {
+        final String name;
+        final String uri;
+
+        NamedUri(String name, String uri) {
+            this.name = name == null ? "" : name;
+            this.uri = uri == null ? "" : uri;
         }
     }
 
