@@ -5,11 +5,13 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.ServiceConnection;
 import android.content.SharedPreferences;
+import android.database.Cursor;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.IBinder;
 import android.os.Looper;
+import android.provider.OpenableColumns;
 import android.view.Gravity;
 import android.view.ViewGroup;
 import android.widget.Button;
@@ -25,7 +27,17 @@ import androidx.media3.common.Player;
 import androidx.media3.common.PlaybackParameters;
 import androidx.media3.exoplayer.ExoPlayer;
 
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Locale;
+import java.util.zip.ZipEntry;
+import java.util.zip.ZipInputStream;
 
 public class NowPlayingActivity extends AppCompatActivity {
     private static final int COLOR_BG = 0xFF160E09;
@@ -42,6 +54,7 @@ public class NowPlayingActivity extends AppCompatActivity {
     private TextView time;
     private TextView speed;
     private TextView mode;
+    private TextView visual;
     private SeekBar seekBar;
     private Button playButton;
     private SharedPreferences prefs;
@@ -79,7 +92,7 @@ public class NowPlayingActivity extends AppCompatActivity {
         title.setGravity(Gravity.CENTER);
         subtitle = label("正在播放", 14, COLOR_SUBTLE);
         subtitle.setGravity(Gravity.CENTER);
-        TextView visual = label("耳朵在树洞里听见了声音", 20, COLOR_ACCENT);
+        visual = label("耳朵在树洞里听见了声音", 18, COLOR_ACCENT);
         visual.setGravity(Gravity.CENTER);
         visual.setBackgroundColor(0xFF2B160A);
         visual.setPadding(dp(12), dp(42), dp(12), dp(42));
@@ -205,6 +218,184 @@ public class NowPlayingActivity extends AppCompatActivity {
         String repeat = player.getRepeatMode() == Player.REPEAT_MODE_ONE ? "单曲循环"
                 : player.getRepeatMode() == Player.REPEAT_MODE_ALL ? "列表循环" : "顺序播放";
         mode.setText(repeat);
+        if (visual != null) visual.setText(nowPlayingBody(position));
+    }
+
+    private String nowPlayingBody(long positionMs) {
+        String timed = currentTimedText(currentMediaUri(), positionMs);
+        if (!timed.isEmpty()) return timed;
+        String reading = currentReadingChunk();
+        if (!reading.isEmpty()) return reading;
+        if (player != null && player.getCurrentMediaItem() != null) {
+            CharSequence t = player.getCurrentMediaItem().mediaMetadata.title;
+            return (t == null ? "洞听播放器" : t) + "\n暂无歌词/字幕";
+        }
+        return "耳朵在树洞里听见了声音";
+    }
+
+    private String currentMediaUri() {
+        if (player == null || player.getCurrentMediaItem() == null) return "";
+        MediaItem item = player.getCurrentMediaItem();
+        if (item.localConfiguration == null) return "";
+        return item.localConfiguration.uri.toString();
+    }
+
+    private String currentTimedText(String mediaUri, long positionMs) {
+        if (mediaUri.isEmpty()) return "";
+        long offset = prefs.getLong("timedOffset:" + mediaUri, 0);
+        String raw = prefs.getString("timed:" + mediaUri, "[]");
+        long adjusted = positionMs - offset;
+        String current = "";
+        try {
+            JSONArray array = new JSONArray(raw);
+            for (int i = 0; i < array.length(); i++) {
+                JSONObject obj = array.getJSONObject(i);
+                long timeMs = obj.optLong("t", 0);
+                if (timeMs <= adjusted + 250) current = obj.optString("x", ""); else break;
+            }
+        } catch (JSONException ignored) {
+        }
+        return current == null ? "" : current.trim();
+    }
+
+    private String currentReadingChunk() {
+        String uri = prefs.getString("lastTextUri", "");
+        if (uri.isEmpty()) return "";
+        String text = readText(Uri.parse(uri));
+        if (text.trim().isEmpty()) return "";
+        List<String> chunks = splitTextForTts(text);
+        if (chunks.isEmpty()) return "";
+        int index = Math.max(0, Math.min(prefs.getInt("ttsChunk:" + uri, 0), chunks.size() - 1));
+        return "朗读文字  " + (index + 1) + "/" + chunks.size() + "\n" + chunks.get(index);
+    }
+
+    private List<String> splitTextForTts(String text) {
+        List<String> chunks = new ArrayList<>();
+        String normalized = text.replace("\r\n", "\n").replace('\r', '\n').trim();
+        StringBuilder builder = new StringBuilder();
+        for (int i = 0; i < normalized.length(); i++) {
+            char ch = normalized.charAt(i);
+            builder.append(ch);
+            boolean boundary = ch == '\n' || ch == '。' || ch == '！' || ch == '？' || ch == '.' || ch == '!' || ch == '?';
+            if (builder.length() >= 350 && boundary) {
+                chunks.add(builder.toString().trim());
+                builder.setLength(0);
+            } else if (builder.length() >= 700) {
+                chunks.add(builder.toString().trim());
+                builder.setLength(0);
+            }
+        }
+        if (builder.length() > 0) chunks.add(builder.toString().trim());
+        return chunks;
+    }
+
+    private String readText(Uri uri) {
+        if (isEpubUri(uri)) return readEpubText(uri);
+        try (InputStream input = getContentResolver().openInputStream(uri);
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            if (input == null) return "";
+            byte[] buffer = new byte[4096];
+            int read;
+            while ((read = input.read(buffer)) != -1) output.write(buffer, 0, read);
+            String text = output.toString("UTF-8");
+            return isJsonUri(uri) ? jsonToReadableText(text) : text;
+        } catch (Exception ignored) {
+            return "";
+        }
+    }
+
+    private boolean isJsonUri(Uri uri) {
+        String mime = getContentResolver().getType(uri);
+        String name = displayName(uri).toLowerCase(Locale.ROOT);
+        return "application/json".equals(mime) || name.endsWith(".json");
+    }
+
+    private boolean isEpubUri(Uri uri) {
+        String mime = getContentResolver().getType(uri);
+        String name = displayName(uri).toLowerCase(Locale.ROOT);
+        return "application/epub+zip".equals(mime) || name.endsWith(".epub");
+    }
+
+    private String displayName(Uri uri) {
+        try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int index = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (index >= 0) {
+                    String name = cursor.getString(index);
+                    if (name != null && !name.trim().isEmpty()) return name;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        String name = uri.getLastPathSegment();
+        return name == null ? "" : name;
+    }
+
+    private String readEpubText(Uri uri) {
+        StringBuilder text = new StringBuilder();
+        try (InputStream input = getContentResolver().openInputStream(uri);
+             ZipInputStream zip = new ZipInputStream(input)) {
+            ZipEntry entry;
+            byte[] buffer = new byte[4096];
+            while ((entry = zip.getNextEntry()) != null) {
+                String name = entry.getName().toLowerCase(Locale.ROOT);
+                if (entry.isDirectory() || !(name.endsWith(".xhtml") || name.endsWith(".html") || name.endsWith(".htm") || name.endsWith(".txt"))) continue;
+                ByteArrayOutputStream output = new ByteArrayOutputStream();
+                int read;
+                while ((read = zip.read(buffer)) != -1) output.write(buffer, 0, read);
+                text.append('\n').append(stripHtml(output.toString("UTF-8")));
+            }
+        } catch (Exception ignored) {
+        }
+        return text.toString().trim();
+    }
+
+    private String stripHtml(String html) {
+        return html.replaceAll("(?is)<script.*?</script>", " ")
+                .replaceAll("(?is)<style.*?</style>", " ")
+                .replaceAll("(?i)<br\\s*/?>", "\n")
+                .replaceAll("(?i)</p>|</h[1-6]>|</div>|</li>", "\n")
+                .replaceAll("<[^>]+>", " ")
+                .replace("&nbsp;", " ")
+                .replace("&amp;", "&")
+                .replace("&lt;", "<")
+                .replace("&gt;", ">")
+                .replaceAll("[ \\t\\x0B\\f\\r]+", " ")
+                .replaceAll("\\n{3,}", "\n\n")
+                .trim();
+    }
+
+    private String jsonToReadableText(String raw) {
+        StringBuilder builder = new StringBuilder();
+        try {
+            Object root = raw.trim().startsWith("[") ? new JSONArray(raw.trim()) : new JSONObject(raw.trim());
+            appendJsonValue(builder, root, "");
+            String result = builder.toString().trim();
+            return result.isEmpty() ? raw : result;
+        } catch (JSONException ignored) {
+            return raw;
+        }
+    }
+
+    private void appendJsonValue(StringBuilder builder, Object value, String prefix) throws JSONException {
+        if (value instanceof JSONObject) {
+            JSONObject object = (JSONObject) value;
+            JSONArray names = object.names();
+            if (names == null) return;
+            for (int i = 0; i < names.length(); i++) {
+                String key = names.getString(i);
+                appendJsonValue(builder, object.get(key), key);
+            }
+        } else if (value instanceof JSONArray) {
+            JSONArray array = (JSONArray) value;
+            for (int i = 0; i < array.length(); i++) appendJsonValue(builder, array.get(i), prefix);
+        } else if (value != null && value != JSONObject.NULL) {
+            String text = String.valueOf(value).trim();
+            if (!text.isEmpty()) {
+                if (!prefix.isEmpty()) builder.append(prefix).append("：");
+                builder.append(text).append('\n');
+            }
+        }
     }
 
     @Override
