@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "DongtingPlayer"
+rootProject.name = "DidongPlayer"
 include ":app"

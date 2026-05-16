@@ -611,9 +611,9 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
         NotificationChannel channel = new NotificationChannel(
                 CHANNEL_ID,
-                "洞听朗读",
+                "地洞朗读",
                 NotificationManager.IMPORTANCE_LOW);
-        channel.setDescription("洞听播放器 TXT 后台朗读控制");
+        channel.setDescription("地洞播放器 TXT 后台朗读控制");
         NotificationManager manager = getSystemService(NotificationManager.class);
         if (manager != null) manager.createNotificationChannel(channel);
     }
@@ -626,7 +626,7 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
             byte[] buffer = new byte[4096];
             int read;
             while ((read = input.read(buffer)) != -1) output.write(buffer, 0, read);
-            String text = output.toString("UTF-8");
+            String text = MediaUtils.decodeTextBytes(output.toByteArray());
             return isJsonUri(uri) ? jsonToReadableText(text) : text;
         } catch (Exception ignored) {
             return "";
@@ -659,7 +659,7 @@ public class TextReaderService extends Service implements TextToSpeech.OnInitLis
                 ByteArrayOutputStream output = new ByteArrayOutputStream();
                 int read;
                 while ((read = zip.read(buffer)) != -1) output.write(buffer, 0, read);
-                text.append('\n').append(stripHtml(output.toString("UTF-8")));
+                text.append('\n').append(stripHtml(MediaUtils.decodeTextBytes(output.toByteArray())));
             }
         } catch (Exception ignored) {
         }

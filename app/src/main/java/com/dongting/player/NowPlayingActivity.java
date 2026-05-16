@@ -90,7 +90,7 @@ public class NowPlayingActivity extends AppCompatActivity {
         root.setPadding(dp(16), dp(16), dp(16), dp(16));
         root.setBackgroundColor(COLOR_BG);
 
-        title = label("洞听播放器", 24, COLOR_TEXT);
+        title = label("地洞播放器", 24, COLOR_TEXT);
         title.setGravity(Gravity.CENTER);
         subtitle = label("正在播放", 14, COLOR_SUBTLE);
         subtitle.setGravity(Gravity.CENTER);
@@ -256,7 +256,7 @@ public class NowPlayingActivity extends AppCompatActivity {
         if (player.getCurrentMediaItem() != null) {
             CharSequence t = player.getCurrentMediaItem().mediaMetadata.title;
             CharSequence s = player.getCurrentMediaItem().mediaMetadata.artist;
-            title.setText(t == null ? "洞听播放器" : t);
+            title.setText(t == null ? "地洞播放器" : t);
             subtitle.setText(s == null ? "" : s);
         }
         long duration = player.getDuration();
@@ -363,7 +363,7 @@ public class NowPlayingActivity extends AppCompatActivity {
         }
         if (player != null && player.getCurrentMediaItem() != null) {
             CharSequence t = player.getCurrentMediaItem().mediaMetadata.title;
-            return (t == null ? "洞听播放器" : t) + "\n暂无歌词";
+            return (t == null ? "地洞播放器" : t) + "\n暂无歌词";
         }
         return "耳朵在树洞里听见了声音";
     }
@@ -571,7 +571,7 @@ public class NowPlayingActivity extends AppCompatActivity {
             byte[] buffer = new byte[4096];
             int read;
             while ((read = input.read(buffer)) != -1) output.write(buffer, 0, read);
-            String text = output.toString("UTF-8");
+            String text = MediaUtils.decodeTextBytes(output.toByteArray());
             return isJsonUri(uri) ? jsonToReadableText(text) : text;
         } catch (Exception ignored) {
             return "";
@@ -617,7 +617,7 @@ public class NowPlayingActivity extends AppCompatActivity {
                 ByteArrayOutputStream output = new ByteArrayOutputStream();
                 int read;
                 while ((read = zip.read(buffer)) != -1) output.write(buffer, 0, read);
-                text.append('\n').append(stripHtml(output.toString("UTF-8")));
+                text.append('\n').append(stripHtml(MediaUtils.decodeTextBytes(output.toByteArray())));
             }
         } catch (Exception ignored) {
         }

@@ -157,6 +157,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private TextView videoSubtitleLabel;
     private Button advancedToggleButton;
     private Button playPauseButton;
+    private Button textReadButton;
     private Button mediaFilterButton;
     private SeekBar positionBar;
     private SeekBar videoControlSeekBar;
@@ -531,7 +532,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         rootLayout.setBackgroundColor(COLOR_BG);
         rootLayout.setPadding(dp(10), dp(10), dp(10), dp(10));
 
-        nowPlaying = label("洞听播放器", 20, COLOR_TEXT);
+        nowPlaying = label("地洞播放器", 20, COLOR_TEXT);
         nowPlaying.setGravity(Gravity.CENTER_VERTICAL);
         nowPlaying.setOnClickListener(v -> togglePlay());
         nowPlaying.setOnLongClickListener(v -> {
@@ -792,29 +793,33 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 btn("清位置", v -> clearCurrentPosition())
         ));
 
+        textReadButton = btn("朗读/暂停", v -> speakText());
+        textReadButton.setTextSize(18);
+        textReadButton.setTextColor(0xFF160E09);
+        textReadButton.setBackgroundColor(COLOR_ACCENT);
         controls.addView(row(
+                textReadButton,
                 btn("导入TXT", v -> pickText()),
                 btn("TXT文件夹", v -> pickTextFolder()),
-                btn("朗读/暂停", v -> speakText()),
+                btn("TXT书架", v -> showTextBookshelf())
+        ));
+        controls.addView(row(
                 btn("朗读分段", v -> showTextChunksDialog()),
-                btn("默认TTS", v -> useSystemDefaultTts())
+                btn("搜文本", v -> showTextSearchDialog()),
+                btn("章节目录", v -> showTextChaptersDialog()),
+                btn("朗读书签", v -> showTextBookmarksDialog())
         ));
         controls.addView(row(
-                btn("TXT书架", v -> showTextBookshelf()),
-                btn("扫描历史", v -> showScanHistoryDialog()),
-                btn("设备自检", v -> showDeviceCheckDialog()),
-                btn("数据备份", v -> showBackupDialog())
-        ));
-        controls.addView(row(
-                btn("视频全屏", v -> enterVideoFullScreen()),
+                btn("默认TTS", v -> useSystemDefaultTts()),
                 btn("系统TTS", v -> openTtsSettings()),
-                btn("停止朗读", v -> stopSpeaking())
+                btn("停止朗读", v -> stopSpeaking()),
+                btn("视频全屏", v -> enterVideoFullScreen())
         ));
         controls.addView(row(
                 btn("歌词/字幕", v -> pickTimedText()),
-                btn("清歌词", v -> clearTimedText()),
-                btn("搜文本", v -> showTextSearchDialog()),
-                btn("朗读书签", v -> showTextBookmarksDialog())
+                btn("扫描历史", v -> showScanHistoryDialog()),
+                btn("设备自检", v -> showDeviceCheckDialog()),
+                btn("数据备份", v -> showBackupDialog())
         ));
         advancedPanel.addView(row(
                 btn("字幕候选", v -> showTimedTextCandidates()),
@@ -830,7 +835,9 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         ));
         advancedPanel.addView(row(
                 btn("重置字幕偏移", v -> resetTimedTextOffset()),
-                btn("手动导入字幕", v -> pickTimedText())
+                btn("手动导入字幕", v -> pickTimedText()),
+                btn("清歌词", v -> clearTimedText()),
+                btn("字幕列表", v -> showTimedTextCandidates())
         ));
         voiceSpinner = new Spinner(this);
         controls.addView(voiceSpinner, fullWrap());
@@ -1562,7 +1569,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 if (current != null) {
                     title.setText(current.title);
                     subtitle.setText(current.folderName + " · " + ("video".equals(current.type) ? "视频" : "音频"));
-                    cover.setText("video".equals(current.type) ? "视频画面正在洞听" : "耳朵在树洞里听见了声音");
+                    cover.setText("video".equals(current.type) ? "视频画面正在播放" : "耳朵在树洞里听见了声音");
                     List<Bookmark> marks = loadBookmarks(current.uri);
                     bookmarkInfo.setText("书签：" + marks.size() + " 个");
                 }
@@ -2262,7 +2269,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         MediaEntry entry = currentEntry();
         boolean reading = TextReaderService.isRunning() && !TextReaderService.isPaused();
         boolean playing = reading || (player != null && player.isPlaying());
-        String title = entry == null ? "洞听播放器" : entry.title;
+        String title = entry == null ? "地洞播放器" : entry.title;
         String subtitle = entry == null ? "耳朵在树洞里听见了声音" : entry.folderName;
         String body = visualBodyText(entry, reading);
         int boost = boostBar == null ? prefs.getInt("boost", 0) : boostBar.getProgress();
@@ -3017,7 +3024,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         if (items.isEmpty()) {
             currentIndex = -1;
             setQueue(items, false);
-            nowPlaying.setText("洞听播放器");
+            nowPlaying.setText("地洞播放器");
             return;
         }
 
@@ -3398,7 +3405,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             tts = null;
         }
         createTtsFromSystemDefault();
-        status("已清除洞听内保存的人声绑定，正在重新连接系统默认 TTS：" + currentSystemTtsEngine());
+        status("已清除地洞内保存的人声绑定，正在重新连接系统默认 TTS：" + currentSystemTtsEngine());
     }
 
     private void openTtsSettings() {
@@ -3971,7 +3978,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                         Intent intent = new Intent(Intent.ACTION_CREATE_DOCUMENT);
                         intent.addCategory(Intent.CATEGORY_OPENABLE);
                         intent.setType("application/json");
-                        intent.putExtra(Intent.EXTRA_TITLE, "dongting-backup-v0.0.10.json");
+                        intent.putExtra(Intent.EXTRA_TITLE, "didong-backup-v0.0.15.json");
                         backupExporter.launch(intent);
                     } else if (which == 1) {
                         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
@@ -4303,7 +4310,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
     private void confirmClearBackgroundMusic() {
         new AlertDialog.Builder(this)
                 .setTitle("清空背景音乐列表")
-                .setMessage("只会清空洞听里的背景音乐列表，不会删除原文件。")
+                .setMessage("只会清空地洞里的背景音乐列表，不会删除原文件。")
                 .setPositiveButton("清空", (dialog, which) -> {
                     backgroundMusicUris.clear();
                     saveBackgroundMusicList();
@@ -4337,7 +4344,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             byte[] buffer = new byte[4096];
             int read;
             while ((read = input.read(buffer)) != -1) output.write(buffer, 0, read);
-            return output.toString("UTF-8");
+            return MediaUtils.decodeTextBytes(output.toByteArray());
         } catch (Exception ex) {
             status("读取文本失败：" + ex.getMessage());
             return "";
@@ -4370,7 +4377,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
                 ByteArrayOutputStream output = new ByteArrayOutputStream();
                 int read;
                 while ((read = zip.read(buffer)) != -1) output.write(buffer, 0, read);
-                text.append('\n').append(stripHtml(output.toString("UTF-8")));
+                text.append('\n').append(stripHtml(MediaUtils.decodeTextBytes(output.toByteArray())));
             }
         } catch (Exception ex) {
             status("读取 EPUB 失败：" + ex.getMessage());
@@ -4455,8 +4462,8 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
             if (database != null) {
                 for (Map.Entry<String, String> entry : database.all().entrySet()) dbObj.put(entry.getKey(), entry.getValue());
             }
-            root.put("app", "洞听播放器");
-            root.put("version", "0.0.10");
+            root.put("app", "地洞播放器");
+            root.put("version", "0.0.15");
             root.put("exportedAt", System.currentTimeMillis());
             root.put("prefs", prefObj);
             root.put("db", dbObj);
@@ -4987,7 +4994,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         private final Paint textPaint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Path path = new Path();
         private final RectF rect = new RectF();
-        private String title = "洞听播放器";
+        private String title = "地洞播放器";
         private String subtitle = "耳朵在树洞里听见了声音";
         private String body = "扫描文件夹或打开文件后，这里会显示封面、歌词或朗读文字。";
         private boolean active;
@@ -5001,7 +5008,7 @@ public class MainActivity extends AppCompatActivity implements TextToSpeech.OnIn
         }
 
         void setState(String nextTitle, String nextSubtitle, String nextBody, boolean nextActive, boolean nextReading, float nextEffect) {
-            title = nextTitle == null || nextTitle.trim().isEmpty() ? "洞听播放器" : nextTitle;
+            title = nextTitle == null || nextTitle.trim().isEmpty() ? "地洞播放器" : nextTitle;
             subtitle = nextSubtitle == null || nextSubtitle.trim().isEmpty() ? "耳朵在树洞里听见了声音" : nextSubtitle;
             body = nextBody == null || nextBody.trim().isEmpty() ? "暂无歌词" : nextBody;
             active = nextActive;

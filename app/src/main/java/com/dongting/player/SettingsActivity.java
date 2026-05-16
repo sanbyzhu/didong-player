@@ -52,7 +52,7 @@ public class SettingsActivity extends AppCompatActivity {
         root.setPadding(dp(14), dp(14), dp(14), dp(24));
         scroll.addView(root);
 
-        TextView title = label("洞听设置中心", 22, COLOR_TEXT);
+        TextView title = label("地洞设置中心", 22, COLOR_TEXT);
         title.setGravity(Gravity.CENTER_VERTICAL);
         root.addView(title);
         root.addView(label("把播放、朗读、视频和数据设置集中到这里。部分播放中的实时设置仍在主界面立即生效。", 13, COLOR_SUBTLE));
@@ -89,7 +89,7 @@ public class SettingsActivity extends AppCompatActivity {
                     notifyBackgroundVolumeIfNeeded("bgVolume");
                     toast("朗读设置已恢复默认");
                 }),
-                btn("清除洞听人声绑定", v -> {
+                btn("清除地洞人声绑定", v -> {
                     prefs.edit().remove("ttsVoice").apply();
                     toast("已清除人声绑定，朗读将使用系统默认 TTS 引擎");
                 }),
@@ -135,7 +135,7 @@ public class SettingsActivity extends AppCompatActivity {
                 label("清空列表只会删除 App 内记录，不会删除手机里的音频/视频文件。", 13, COLOR_SUBTLE));
 
         addSection(root, "开发说明",
-                label("洞听播放器由朱振坚个人利用 AI 在业余时间开发，仅供个人学习研究使用，莫要用于商业销售。", 14, COLOR_TEXT),
+                label("地洞播放器由朱振坚个人利用 AI 在业余时间开发，并按 Apache-2.0 许可证开源发布。", 14, COLOR_TEXT),
                 label("首发在公众号：小二菜园", 14, COLOR_SUBTLE),
                 label("微信和 QQ：254850837", 14, COLOR_SUBTLE),
                 label("祝大家学习愉快！", 14, COLOR_ACCENT));
@@ -297,7 +297,7 @@ public class SettingsActivity extends AppCompatActivity {
         try {
             String separator = forward.contains("?") ? "&" : "?";
             String url = forward + separator
-                    + "text=" + URLEncoder.encode("洞听 MultiTTS 接口测试。", "UTF-8")
+                    + "text=" + URLEncoder.encode("地洞 MultiTTS 接口测试。", "UTF-8")
                     + "&speed=50&volume=100&pitch=50";
             String voice = prefs.getString("externalTtsVoice", "");
             if (!voice.trim().isEmpty()) url += "&voice=" + URLEncoder.encode(voice.trim(), "UTF-8");

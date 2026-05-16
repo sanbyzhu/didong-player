@@ -115,7 +115,7 @@ public class PlaybackService extends Service {
         PendingIntent contentIntent = PendingIntent.getActivity(
                 this, 0, openIntent, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
-        String title = "洞听播放器";
+        String title = "地洞播放器";
         String subtitle = player.isPlaying() ? "正在播放" : "已暂停";
         if (player.getCurrentMediaItem() != null && player.getCurrentMediaItem().mediaMetadata.title != null) {
             title = String.valueOf(player.getCurrentMediaItem().mediaMetadata.title);
@@ -164,9 +164,9 @@ public class PlaybackService extends Service {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return;
         NotificationChannel channel = new NotificationChannel(
                 CHANNEL_ID,
-                "洞听播放",
+                "地洞播放",
                 NotificationManager.IMPORTANCE_LOW);
-        channel.setDescription("洞听播放器后台播放控制");
+        channel.setDescription("地洞播放器后台播放控制");
         NotificationManager manager = getSystemService(NotificationManager.class);
         if (manager != null) manager.createNotificationChannel(channel);
     }

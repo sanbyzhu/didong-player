@@ -3,6 +3,13 @@ package com.dongting.player;
 import androidx.annotation.Nullable;
 import androidx.media3.common.C;
 
+import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
+import java.nio.charset.CharacterCodingException;
+import java.nio.charset.Charset;
+import java.nio.charset.CharsetDecoder;
+import java.nio.charset.CodingErrorAction;
+import java.nio.charset.StandardCharsets;
 import java.text.Collator;
 import java.util.Locale;
 import java.util.regex.Matcher;
@@ -48,6 +55,65 @@ final class MediaUtils {
         if (ms == C.TIME_UNSET || ms < 0) return "--:--";
         long total = ms / 1000;
         return String.format(Locale.CHINA, "%02d:%02d", total / 60, total % 60);
+    }
+
+    static String decodeTextBytes(byte[] bytes) {
+        if (bytes == null || bytes.length == 0) return "";
+        if (startsWith(bytes, 0xEF, 0xBB, 0xBF)) {
+            return new String(bytes, 3, bytes.length - 3, StandardCharsets.UTF_8);
+        }
+        if (startsWith(bytes, 0xFF, 0xFE)) {
+            return new String(bytes, 2, bytes.length - 2, StandardCharsets.UTF_16LE);
+        }
+        if (startsWith(bytes, 0xFE, 0xFF)) {
+            return new String(bytes, 2, bytes.length - 2, StandardCharsets.UTF_16BE);
+        }
+        String utf8 = decodeStrict(bytes, StandardCharsets.UTF_8);
+        if (utf8 != null) return utf8;
+        if (looksLikeUtf16Le(bytes)) return new String(bytes, StandardCharsets.UTF_16LE);
+        if (looksLikeUtf16Be(bytes)) return new String(bytes, StandardCharsets.UTF_16BE);
+        for (String charset : new String[]{"GB18030", "GBK", "Big5"}) {
+            String decoded = decodeStrict(bytes, Charset.forName(charset));
+            if (decoded != null) return decoded;
+        }
+        return new String(bytes, Charset.forName("GB18030"));
+    }
+
+    @Nullable
+    private static String decodeStrict(byte[] bytes, Charset charset) {
+        CharsetDecoder decoder = charset.newDecoder()
+                .onMalformedInput(CodingErrorAction.REPORT)
+                .onUnmappableCharacter(CodingErrorAction.REPORT);
+        try {
+            CharBuffer chars = decoder.decode(ByteBuffer.wrap(bytes));
+            return chars.toString();
+        } catch (CharacterCodingException ignored) {
+            return null;
+        }
+    }
+
+    private static boolean startsWith(byte[] bytes, int... prefix) {
+        if (bytes.length < prefix.length) return false;
+        for (int i = 0; i < prefix.length; i++) {
+            if ((bytes[i] & 0xFF) != prefix[i]) return false;
+        }
+        return true;
+    }
+
+    private static boolean looksLikeUtf16Le(byte[] bytes) {
+        int pairs = Math.min(bytes.length / 2, 200);
+        if (pairs < 4) return false;
+        int zeros = 0;
+        for (int i = 0; i < pairs; i++) if (bytes[i * 2 + 1] == 0) zeros++;
+        return zeros > pairs * 0.6f;
+    }
+
+    private static boolean looksLikeUtf16Be(byte[] bytes) {
+        int pairs = Math.min(bytes.length / 2, 200);
+        if (pairs < 4) return false;
+        int zeros = 0;
+        for (int i = 0; i < pairs; i++) if (bytes[i * 2] == 0) zeros++;
+        return zeros > pairs * 0.6f;
     }
 
     @Nullable

@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>洞听播放器 Windows 尝鲜版</title>
+  <title>地洞播放器 Windows 尝鲜版</title>
   <style>
     :root {
       color-scheme: dark;
@@ -266,7 +266,7 @@
       <section class="brand">
         <div class="logo" aria-hidden="true"></div>
         <div>
-          <h1>洞听播放器 Windows 尝鲜版</h1>
+          <h1>地洞播放器 Windows 尝鲜版</h1>
           <div class="subtle" id="nowInfo">先扫描文件夹或打开文件</div>
         </div>
       </section>
@@ -369,7 +369,7 @@
 
     const audioExt = /\.(mp3|flac|wav|m4a|aac|ogg|opus|wma)$/i;
     const videoExt = /\.(mp4|mkv|mov|avi|webm|m4v|ts|flv|wmv)$/i;
-    const memory = JSON.parse(localStorage.getItem('dongtingWindowsMemory') || '{}');
+    const memory = JSON.parse(localStorage.getItem('didongWindowsMemory') || '{}');
     let tracks = [];
     let folders = [];
     let currentFolder = '';
@@ -392,7 +392,7 @@
     }
 
     function saveMemory() {
-      localStorage.setItem('dongtingWindowsMemory', JSON.stringify(memory));
+      localStorage.setItem('didongWindowsMemory', JSON.stringify(memory));
     }
 
     function naturalNumber(name) {

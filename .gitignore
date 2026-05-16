@@ -1,4 +1,7 @@
 .gradle/
+.omx/
+.idea/
+marketing/
 build/
 app/build/
 local.properties
@@ -6,9 +9,8 @@ local.properties
 *.ap_
 *.aab
 *.zip
+*.iml
 *.keystore
 *.jks
-.omx/logs/
-.omx/state/
-.omx/metrics.json
-.omx/tmux-hook.json
+captures/
+tools/generate_marketing_assets.py
