@@ -1,6 +1,6 @@
 # 地洞播放器
 
-地洞播放器是一个安卓优先的本地音频、视频和 TXT 朗读播放器。它使用 AndroidX Media3/ExoPlayer 作为播放核心，面向听课、听书、整理本地影音和长文本朗读等场景。
+地洞播放器是一个【安卓】优先的本地音频、视频和 TXT 朗读播放器（7MB左右）。它使用 AndroidX Media3/ExoPlayer 作为播放核心，面向听课、听书、整理本地影音和长文本朗读等场景。
 
 当前版本：`V0.0.15`
 
@@ -74,7 +74,7 @@ http://127.0.0.1:8774/forward
 
 ## 贡献
 
-欢迎通过 Issue 反馈问题或提出想法。提交代码前请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
+欢迎通过 Issue 反馈问题或提出想法，有问题也可与我取得联系(公众号：小二菜园，邮箱254850837@qq.com)。提交代码前请先阅读 [CONTRIBUTING.md](CONTRIBUTING.md)。
 
 ## 后续路线
 
